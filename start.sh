@@ -22,23 +22,30 @@ source .venv/bin/activate
 # 3. Instalar dependencias
 pip install -q -r requirements.txt
 
-# 4. Verificar Ollama
-if curl -sf http://localhost:11434 > /dev/null 2>&1; then
-    echo "[OK]   Ollama running"
-else
-    echo "[WARN] Ollama not running. Starting..."
-    ollama serve &
-    sleep 3
-    if ! curl -sf http://localhost:11434 > /dev/null 2>&1; then
-        echo "[ERROR] Failed to start Ollama"
-        exit 1
-    fi
-fi
+# 4. Detectar backend AI
+AI_BACKEND=$(grep -E "^AI_BACKEND=" .env | cut -d= -f2 || echo "ollama")
 
-# 5. Verificar modelo
-if ! ollama list 2>/dev/null | grep -q "llama3.2:3b"; then
-    echo "[...] Pulling llama3.2:3b (first time only)..."
-    ollama pull llama3.2:3b
+if [ "$AI_BACKEND" != "groq" ]; then
+    # 5. Verificar Ollama
+    if curl -sf http://localhost:11434 > /dev/null 2>&1; then
+        echo "[OK]   Ollama running"
+    else
+        echo "[WARN] Ollama not running. Starting..."
+        ollama serve &
+        sleep 3
+        if ! curl -sf http://localhost:11434 > /dev/null 2>&1; then
+            echo "[ERROR] Failed to start Ollama"
+            exit 1
+        fi
+    fi
+
+    # 6. Verificar modelo
+    if ! ollama list 2>/dev/null | grep -q "llama3.2:3b"; then
+        echo "[...] Pulling llama3.2:3b (first time only)..."
+        ollama pull llama3.2:3b
+    fi
+else
+    echo "[OK]   Using Groq backend — skipping Ollama"
 fi
 
 # 6. Iniciar backend
