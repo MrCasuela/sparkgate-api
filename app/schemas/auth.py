@@ -1,9 +1,20 @@
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class RegisterRequest(BaseModel):
     email: str
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        if not EMAIL_RE.match(v):
+            raise ValueError("Formato de correo electrónico inválido")
+        return v
 
 
 class LoginRequest(BaseModel):
@@ -14,6 +25,8 @@ class LoginRequest(BaseModel):
 class RegisterResponse(BaseModel):
     message: str
     user_id: str
+    plan: str = Field(default="Gratuito")
+    access_token: str | None = None
 
 
 class LoginResponse(BaseModel):
