@@ -18,11 +18,30 @@ async def register(body: RegisterRequest):
         result = supabase.auth.sign_up({
             "email": body.email,
             "password": body.password,
-            "options": {"data": {"premium": False}},
+            "options": {"data": {"premium": False, "plan": "Gratuito"}},
         })
-        return RegisterResponse(message="User registered", user_id=result.user.id)
     except Exception as e:
+        if "already registered" in str(e).lower() or "already exists" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Este correo ya está registrado. Inicia sesión con tu cuenta existente.",
+            )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Supabase returns a user with no identities (instead of raising) when the
+    # email already belongs to a confirmed account, to avoid email enumeration.
+    if result.user is not None and not result.user.identities:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Este correo ya está registrado. Inicia sesión con tu cuenta existente.",
+        )
+
+    return RegisterResponse(
+        message="User registered",
+        user_id=result.user.id,
+        plan="Gratuito",
+        access_token=result.session.access_token if result.session else None,
+    )
 
 
 @router.post("/login", response_model=LoginResponse)
