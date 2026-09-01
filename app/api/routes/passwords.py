@@ -64,7 +64,14 @@ async def generate_password(
 ):
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return await generate_password_core(request)
 
+
+async def generate_password_core(
+    request: PasswordGenerateRequest,
+) -> PasswordGenerateResponse:
+    """Core generation logic, reused by /passwords/generate and the dashboard
+    offboarding endpoints (which call it internally, not over HTTP)."""
     if request.mode == "random":
         password = random_generator.generate(
             length=request.length,
