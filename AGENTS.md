@@ -58,8 +58,24 @@ Send as JSON fields or form data, not nested.
 | GET | `/api/v1/health` | Ollama root url + Supabase session |
 | POST | `/api/v1/auth/register` | Proxy Supabase Auth |
 | POST | `/api/v1/auth/login` | Returns `access_token` |
+| POST | `/api/v1/auth/logout` | Revokes caller's own session. Requires Bearer; `admin.sign_out(jwt, scope="global")`. Cannot revoke another user's session — offboarding uses the dashboard revoke endpoint (ban + password rotation). |
 | POST | `/api/v1/passwords/evaluate` | 3 dimensions (entropy + AI + HIBP) |
 | POST | `/api/v1/passwords/generate` | 2 modes: `ai` (default) or `random`; AI supports style/word_count/theme/personal_words |
+| GET | `/api/v1/dashboard/members` | Admin. Org demos y credenciales (interna/externa) con estado |
+| GET | `/api/v1/dashboard/audit-log` | Admin. Acta `created_at desc`; nunca guarda contraseñas (AC4) |
+| POST | `/api/v1/dashboard/credentials/{id}/revoke` | Admin. Solo interna. `update_user_by_id` ban+rotación password. Password generada server-side (o `new_password` override 12-64) |
+| POST | `/api/v1/dashboard/credentials/{id}/suggest` | Admin. Solo externa. Genera propuesta server-side; status `pendiente_aplicacion_manual` |
+| POST | `/api/v1/dashboard/credentials/{id}/restore` | Admin. Desbanea (`ban_duration:"none"`) y `activa` |
+
+## Offboarding dashboard (SP-1)
+
+Backend en `app/api/routes/dashboard.py`. Frontend (`dashboard.html`) vive en el repo de la extensión (fuera de alcance aquí).
+
+- Tipos de credencial: `interna` (gestionada SparkGate, tiene `supabase_user_id`) / `externa` (fuera de control).
+- Estados: `activa`, `revocada`, `pendiente_aplicacion_manual`.
+- Revocar interna: `update_user_by_id(user_id, {password, ban_duration:"87600h"})` → bloquea logins/refresos futuros; un access token emitido vive hasta expirar (~1h, AC6). Guard: no revocar tu propia cuenta admin.
+- Password generada server-side vía `random_generator` (`_resolve_password`); `new_password` del body es override opcional. **Nunca** se escribe en `dashboard_audit_log` (AC4).
+- Demo seed: `python scripts/seed_dashboard_demo.py` (4 miembros, idempotente, requiere service_role key).
 
 ## Evaluate (3 dimensions)
 

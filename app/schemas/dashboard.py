@@ -21,7 +21,7 @@ class MemberOut(BaseModel):
 
 
 class CredentialActionRequest(BaseModel):
-    new_password: str = Field(..., min_length=12, max_length=64)
+    new_password: str | None = Field(None, min_length=12, max_length=64)
 
 
 class CredentialActionResponse(BaseModel):

@@ -303,3 +303,112 @@ async def test_audit_log_endpoint_returns_entries(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()[0]["action"] == "revocar_interna"
+
+
+@pytest.mark.asyncio
+async def test_revoke_internal_generates_password_server_side(client, monkeypatch):
+    """No new_password body → the backend generates it and never writes it to audit."""
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "get_credential",
+        credential_lookup_returning(dict(ACTIVE_INTERNAL_CREDENTIAL), REVOKED_INTERNAL_CREDENTIAL),
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "update_credential_status", lambda cid, status: None
+    )
+    audit_calls = []
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "insert_audit_log", lambda **kwargs: audit_calls.append(kwargs)
+    )
+
+    generated = {}
+    monkeypatch.setattr(
+        dashboard.random_generator,
+        "generate",
+        lambda **kwargs: generated.setdefault("value", "SrvGen#Clave#99aA"),
+    )
+
+    fake_admin_client = MagicMock()
+    monkeypatch.setattr(dashboard, "get_supabase_admin", lambda: fake_admin_client)
+
+    async with client as ac:
+        response = await ac.post(
+            f"/api/v1/dashboard/credentials/{ACTIVE_INTERNAL_CREDENTIAL['id']}/revoke",
+            json={},
+        )
+
+    assert response.status_code == 200
+    fake_admin_client.auth.admin.update_user_by_id.assert_called_once_with(
+        "supabase-user-1", {"password": "SrvGen#Clave#99aA", "ban_duration": "87600h"}
+    )
+    assert audit_calls[0]["action"] == "revocar_interna"
+    for call in audit_calls:
+        assert "password" not in call
+        assert "new_password" not in call
+
+
+@pytest.mark.asyncio
+async def test_suggest_external_generates_but_does_not_persist_password(client, monkeypatch):
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "get_credential",
+        credential_lookup_returning(dict(ACTIVE_EXTERNAL_CREDENTIAL), PENDING_EXTERNAL_CREDENTIAL),
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "update_credential_status", lambda cid, status: None
+    )
+    audit_calls = []
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "insert_audit_log", lambda **kwargs: audit_calls.append(kwargs)
+    )
+
+    generated = {}
+    monkeypatch.setattr(
+        dashboard.random_generator,
+        "generate",
+        lambda **kwargs: generated.setdefault("value", "SrvGen#Externa#77zZ"),
+    )
+
+    fake_admin_client = MagicMock()
+    monkeypatch.setattr(dashboard, "get_supabase_admin", lambda: fake_admin_client)
+
+    async with client as ac:
+        response = await ac.post(
+            f"/api/v1/dashboard/credentials/{ACTIVE_EXTERNAL_CREDENTIAL['id']}/suggest",
+            json={},
+        )
+
+    assert response.status_code == 200
+    fake_admin_client.auth.admin.update_user_by_id.assert_not_called()
+    assert audit_calls[0]["action"] == "sugerir_externa"
+    for call in audit_calls:
+        assert "password" not in call
+        assert "new_password" not in call
+
+
+@pytest.mark.asyncio
+async def test_revoke_rejects_already_revoked(client, monkeypatch):
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "get_credential", lambda cid: dict(REVOKED_INTERNAL_CREDENTIAL)
+    )
+    async with client as ac:
+        response = await ac.post(
+            f"/api/v1/dashboard/credentials/{REVOKED_INTERNAL_CREDENTIAL['id']}/revoke",
+            json={"new_password": NEW_PASSWORD},
+        )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_suggest_rejects_already_pending(client, monkeypatch):
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "get_credential",
+        lambda cid: dict(PENDING_EXTERNAL_CREDENTIAL),
+    )
+    async with client as ac:
+        response = await ac.post(
+            f"/api/v1/dashboard/credentials/{PENDING_EXTERNAL_CREDENTIAL['id']}/suggest",
+            json={"new_password": NEW_PASSWORD},
+        )
+    assert response.status_code == 400

@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 
+from app.api.dependencies import security_scheme
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     RegisterRequest,
     RegisterResponse,
 )
-from app.services.db_client import get_supabase
+from app.services.db_client import get_supabase, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -63,10 +65,18 @@ async def login(body: LoginRequest):
 
 
 @router.post("/logout")
-async def logout():
-    supabase = get_supabase()
+async def logout(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security_scheme),
+):
+    """Revoke the caller's own session. Uses the Admin API sign_out on the presented
+    JWT (scope='global' revokes all sessions of that user, not just this one). The
+    caller must pass their own Bearer token — there is no way to revoke another user's
+    session from here; offboarding members who leave is handled by the admin dashboard
+    revoke endpoint (ban + password rotation via update_user_by_id)."""
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     try:
-        supabase.auth.sign_out()
-        return {"message": "Logged out"}
+        get_supabase_admin().auth.admin.sign_out(credentials.credentials, scope="global")
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    return {"message": "Logged out"}
