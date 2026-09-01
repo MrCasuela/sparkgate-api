@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     supabase_url: str = "https://your-project.supabase.co"
     supabase_key: str = "your-anon-key"
+    supabase_service_role_key: str = ""
     ollama_url: str = "http://localhost:11434"
     hibp_api_url: str = "https://api.pwnedpasswords.com"
     env: str = "development"
