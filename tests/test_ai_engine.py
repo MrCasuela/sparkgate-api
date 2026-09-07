@@ -96,33 +96,33 @@ async def test_generate_raises_on_http_error(ollama_backend):
 @pytest.fixture
 def ollama_backend():
     old_backend = settings.ai_backend
-    old_key = settings.groq_api_key
+    old_key = settings.openrouter_api_key
     settings.ai_backend = "ollama"
-    settings.groq_api_key = ""
+    settings.openrouter_api_key = ""
     yield
     settings.ai_backend = old_backend
-    settings.groq_api_key = old_key
+    settings.openrouter_api_key = old_key
 
 
-# ─── Groq backend tests ─────────────────────────────────────────────
+# ─── OpenRouter backend tests ───────────────────────────────────────
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 @pytest.fixture
-def groq_backend():
+def openrouter_backend():
     old_backend = settings.ai_backend
-    old_key = settings.groq_api_key
-    settings.ai_backend = "groq"
-    settings.groq_api_key = "gsk_test_key"
+    old_key = settings.openrouter_api_key
+    settings.ai_backend = "openrouter"
+    settings.openrouter_api_key = "sk-or-test-key"
     yield
     settings.ai_backend = old_backend
-    settings.groq_api_key = old_key
+    settings.openrouter_api_key = old_key
 
 
 @pytest.mark.asyncio
-async def test_groq_evaluate_parses_valid_response(groq_backend):
-    groq_response = {
+async def test_openrouter_evaluate_parses_valid_response(openrouter_backend):
+    openrouter_response = {
         "choices": [{
             "message": {
                 "content": json.dumps({
@@ -134,7 +134,7 @@ async def test_groq_evaluate_parses_valid_response(groq_backend):
         }]
     }
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(json=groq_response, status_code=200)
+        respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         result = await ai_engine.evaluate_security("StrongP@ss1", False)
 
     assert result["ai_score"] == 90
@@ -143,12 +143,12 @@ async def test_groq_evaluate_parses_valid_response(groq_backend):
 
 
 @pytest.mark.asyncio
-async def test_groq_evaluate_fallback_on_malformed_content(groq_backend):
-    groq_response = {
+async def test_openrouter_evaluate_fallback_on_malformed_content(openrouter_backend):
+    openrouter_response = {
         "choices": [{"message": {"content": "Esto no es JSON valido"}}]
     }
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(json=groq_response, status_code=200)
+        respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         result = await ai_engine.evaluate_security("Test123!", False)
 
     assert result["ai_score"] >= 0
@@ -156,16 +156,16 @@ async def test_groq_evaluate_fallback_on_malformed_content(groq_backend):
 
 
 @pytest.mark.asyncio
-async def test_groq_evaluate_raises_on_http_error(groq_backend):
+async def test_openrouter_evaluate_raises_on_http_error(openrouter_backend):
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(status_code=401)
+        respx.post(OPENROUTER_API_URL).respond(status_code=401)
         with pytest.raises(httpx.HTTPStatusError):
             await ai_engine.evaluate_security("Test123!", False)
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_parses_valid_response(groq_backend):
-    groq_response = {
+async def test_openrouter_generate_parses_valid_response(openrouter_backend):
+    openrouter_response = {
         "choices": [{
             "message": {
                 "content": json.dumps({
@@ -176,7 +176,7 @@ async def test_groq_generate_parses_valid_response(groq_backend):
         }]
     }
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(json=groq_response, status_code=200)
+        respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         result = await ai_engine.generate_password(length=16)
 
     assert result["generated_password"] == "Casa#Azul*72!Mar"
@@ -184,52 +184,52 @@ async def test_groq_generate_parses_valid_response(groq_backend):
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_raises_on_invalid_response(groq_backend):
-    groq_response = {
+async def test_openrouter_generate_raises_on_invalid_response(openrouter_backend):
+    openrouter_response = {
         "choices": [{"message": {"content": "not json at all"}}]
     }
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(json=groq_response, status_code=200)
+        respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         with pytest.raises(ValueError, match="invalid response"):
             await ai_engine.generate_password(length=16)
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_raises_on_http_error(groq_backend):
+async def test_openrouter_generate_raises_on_http_error(openrouter_backend):
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(status_code=503)
+        respx.post(OPENROUTER_API_URL).respond(status_code=503)
         with pytest.raises(httpx.HTTPStatusError):
             await ai_engine.generate_password(length=16)
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_raises_on_timeout(groq_backend):
+async def test_openrouter_generate_raises_on_timeout(openrouter_backend):
     with respx.mock:
-        respx.post(GROQ_API_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
+        respx.post(OPENROUTER_API_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
         with pytest.raises(httpx.ReadTimeout):
             await ai_engine.generate_password(length=16)
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_raises_on_connection_error(groq_backend):
+async def test_openrouter_generate_raises_on_connection_error(openrouter_backend):
     with respx.mock:
-        respx.post(GROQ_API_URL).mock(side_effect=Exception("connection refused"))
+        respx.post(OPENROUTER_API_URL).mock(side_effect=Exception("connection refused"))
         with pytest.raises(Exception):
             await ai_engine.generate_password(length=16)
 
 
 @pytest.mark.asyncio
-async def test_groq_evaluate_raises_on_timeout(groq_backend):
+async def test_openrouter_evaluate_raises_on_timeout(openrouter_backend):
     with respx.mock:
-        respx.post(GROQ_API_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
+        respx.post(OPENROUTER_API_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
         with pytest.raises(httpx.ReadTimeout):
             await ai_engine.evaluate_security("Test123!", False)
 
 
 @pytest.mark.asyncio
-async def test_groq_generate_with_context(groq_backend):
+async def test_openrouter_generate_with_context(openrouter_backend):
     """Call generate with context to exercise that code path."""
-    groq_response = {
+    openrouter_response = {
         "choices": [{
             "message": {
                 "content": json.dumps({
@@ -240,7 +240,7 @@ async def test_groq_generate_with_context(groq_backend):
         }]
     }
     with respx.mock:
-        respx.post(GROQ_API_URL).respond(json=groq_response, status_code=200)
+        respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         result = await ai_engine.generate_password(length=16, context="banco")
     assert result["generated_password"] == "Casa#Azul*72!Mar"
 

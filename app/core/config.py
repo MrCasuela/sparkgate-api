@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     env: str = "development"
     cors_origins: str = "chrome-extension://*,http://localhost:3000"
     ai_backend: str = "ollama"
-    groq_api_key: str = ""
-    groq_model: str = "llama-3.1-8b-instant"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "meta-llama/llama-3.1-8b-instruct"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

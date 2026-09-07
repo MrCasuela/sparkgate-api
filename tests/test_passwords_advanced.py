@@ -196,18 +196,23 @@ async def test_generate_ai_retry_exhaustion_returns_502(client):
         "generated_password": "abcdefghijkl",   # 12 lowercase → ~56 bits, below 60
         "explanation": "Low entropy test"
     })
-    groq_response = {
+    openrouter_response = {
         "choices": [{"message": {"content": low_entropy_content}}]
     }
-    groq_url = "https://api.groq.com/openai/v1/chat/completions"
+    openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    with respx.mock:
-        respx.post(groq_url).respond(json=groq_response, status_code=200)
-        async with client as ac:
-            response = await ac.post(
-                "/api/v1/passwords/generate",
-                json={"length": 14, "mode": "ai"},
-            )
+    previous_backend = settings.ai_backend
+    settings.ai_backend = "openrouter"
+    try:
+        with respx.mock:
+            respx.post(openrouter_url).respond(json=openrouter_response, status_code=200)
+            async with client as ac:
+                response = await ac.post(
+                    "/api/v1/passwords/generate",
+                    json={"length": 14, "mode": "ai"},
+                )
+    finally:
+        settings.ai_backend = previous_backend
     assert response.status_code == 502
     data = response.json()
     assert "minimum entropy threshold" in data["detail"]
