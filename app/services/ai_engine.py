@@ -71,11 +71,26 @@ Input: length=12, style=pattern, word_count=2, theme=colores
 Output: {"generated_password": "Azul7Rojo#21", "explanation": "Dos colores combinados en un patron intercalado con numeros y simbolo."}"""
 
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Bump this when prompts change so cached evaluate results are invalidated.
+AI_EVALUATE_VERSION = 1
+
+# Tuned for local inference: bound context and output length to cut latency
+# without changing semantic quality. Output cap per purpose.
+OLLAMA_OPTIONS = {"num_thread": 12, "num_ctx": 1024}
+EVALUATE_NUM_PREDICT = 200
+GENERATE_NUM_PREDICT = 160
 
 
-async def _call_ollama(system_prompt: str, user_prompt: str, timeout: float = 30.0) -> str:
+async def _call_ollama(
+    system_prompt: str, user_prompt: str, timeout: float = 30.0,
+    num_predict: int | None = None,
+) -> str:
     """Call Ollama /api/generate. Returns raw response text."""
+    options = dict(OLLAMA_OPTIONS)
+    if num_predict is not None:
+        options["num_predict"] = num_predict
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{settings.ollama_url}/api/generate",
@@ -85,6 +100,7 @@ async def _call_ollama(system_prompt: str, user_prompt: str, timeout: float = 30
                 "prompt": user_prompt,
                 "stream": False,
                 "format": "json",
+                "options": options,
             },
             timeout=timeout,
         )
@@ -93,24 +109,28 @@ async def _call_ollama(system_prompt: str, user_prompt: str, timeout: float = 30
     return data.get("response", "")
 
 
-async def _call_groq(system_prompt: str, user_prompt: str, timeout: float = 30.0) -> str:
-    """Call Groq API (OpenAI-compatible). Returns raw response text."""
+async def _call_openrouter(
+    system_prompt: str, user_prompt: str, timeout: float = 30.0,
+    max_tokens: int = 200,
+) -> str:
+    """Call OpenRouter API (OpenAI-compatible). Returns raw response text."""
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            GROQ_API_URL,
+            OPENROUTER_API_URL,
             headers={
-                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": settings.groq_model,
+                "model": settings.openrouter_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.7,
-                "max_tokens": 200,
+                "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
+                "reasoning": {"exclude": True},
             },
             timeout=timeout,
         )
@@ -119,11 +139,15 @@ async def _call_groq(system_prompt: str, user_prompt: str, timeout: float = 30.0
     return data["choices"][0]["message"]["content"]
 
 
-async def _call_ai(system_prompt: str, user_prompt: str, timeout: float = 30.0) -> str:
+async def _call_ai(
+    system_prompt: str, user_prompt: str, timeout: float = 30.0,
+    num_predict: int | None = None,
+) -> str:
     """Route to active AI backend based on settings.ai_backend."""
-    if settings.ai_backend == "groq":
-        return await _call_groq(system_prompt, user_prompt, timeout)
-    return await _call_ollama(system_prompt, user_prompt, timeout)
+    if settings.ai_backend == "openrouter":
+        max_tokens = num_predict if num_predict is not None else 200
+        return await _call_openrouter(system_prompt, user_prompt, timeout, max_tokens)
+    return await _call_ollama(system_prompt, user_prompt, timeout, num_predict)
 
 
 def _safe_parse_ollama_response(raw_response: str) -> dict | None:
@@ -164,7 +188,7 @@ async def evaluate_security(password: str, is_pwned: bool) -> dict:
     )
 
     try:
-        raw = await _call_ai(EVALUATE_SYSTEM_PROMPT, user_prompt)
+        raw = await _call_ai(EVALUATE_SYSTEM_PROMPT, user_prompt, num_predict=EVALUATE_NUM_PREDICT)
     except httpx.ReadTimeout:
         logger.error("AI timeout during evaluate_security")
         raise
@@ -226,7 +250,7 @@ async def generate_password(
     )
 
     try:
-        raw = await _call_ai(GENERATE_SYSTEM_PROMPT, user_prompt)
+        raw = await _call_ai(GENERATE_SYSTEM_PROMPT, user_prompt, num_predict=GENERATE_NUM_PREDICT)
     except httpx.ReadTimeout:
         logger.error("AI timeout during generate_password")
         raise

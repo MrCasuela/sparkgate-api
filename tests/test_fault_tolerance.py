@@ -10,12 +10,12 @@ from app.core.config import settings
 @pytest.fixture
 def ollama_backend():
     old_backend = settings.ai_backend
-    old_key = settings.groq_api_key
+    old_key = settings.openrouter_api_key
     settings.ai_backend = "ollama"
-    settings.groq_api_key = ""
+    settings.openrouter_api_key = ""
     yield
     settings.ai_backend = old_backend
-    settings.groq_api_key = old_key
+    settings.openrouter_api_key = old_key
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +23,15 @@ def override_auth():
     app.dependency_overrides[verify_token] = lambda: {"id": "test-user", "premium": True}
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_caches():
+    from app.services.cache import clear_caches
+
+    clear_caches()
+    yield
+    clear_caches()
 
 
 @pytest.fixture
