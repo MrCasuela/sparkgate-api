@@ -4,6 +4,15 @@ import pytest
 import respx
 
 
+@pytest.fixture(autouse=True)
+def clear_caches():
+    from app.services.cache import clear_caches
+
+    clear_caches()
+    yield
+    clear_caches()
+
+
 def get_hibp_prefix(password: str) -> str:
     sha1 = hashlib.sha1(password.encode()).hexdigest().upper()
     return sha1[:5]
