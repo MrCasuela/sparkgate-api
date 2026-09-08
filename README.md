@@ -6,7 +6,7 @@ Backend REST API for AI-assisted password generation and evaluation.
 
 - Python 3.12+ / FastAPI
 - Supabase (Auth + DB)
-- Llama 3.2 via Ollama (local LLM)
+- Llama 3.2 via Ollama (local LLM), OpenRouter API (cloud fallback, `AI_BACKEND=openrouter`)
 - Have I Been Pwned (HIBP) API
 
 ## Quick Start
@@ -43,6 +43,29 @@ uvicorn app.main:app --reload --port 8000
 pytest --cov=. --cov-report=term-missing
 ```
 
+Resultados, matriz de trazabilidad HU↔prueba y evidencia en
+[`docs/PRUEBAS.md`](docs/PRUEBAS.md) (artefactos en `docs/evidencia/`).
+Pruebas manuales (Ollama real, rendimiento) se corren con
+`SPARKGATE_RUN_MANUAL=1 pytest tests/test_ollama.py` / `tests/test_performance.py`.
+E2E con la extensión Chrome (Selenium, requiere `pip install selenium`) con
+`SPARKGATE_RUN_E2E=1 pytest tests/test_e2e_extension.py`.
+
+## CI/CD
+
+GitHub Actions (`.github/workflows/ci-cd.yml`) corre la suite con coverage
+(`--cov-fail-under=70`) en cada push/PR a `develop` y `main`. El deploy a
+[Vercel](https://vercel.com) es automático vía su integración nativa de GitHub
+(preview por push/PR, producción en `main`) — no hay job de deploy separado en
+Actions. Config de build en `vercel.json`.
+
+## Arquitectura
+
+Backend por capas: `api/routes/` coordina y protege, `services/` concentra todo el
+I/O (LLM, HIBP, Supabase), `schemas/` valida contratos y `core/` agrupa
+configuración y excepciones. Rutas importan servicios; servicios nunca importan
+rutas. Documentación completa con diagramas de capas, componentes, modelo de
+datos y flujos en [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
+
 ## API Endpoints
 
 | Method | Path | Description |
@@ -53,6 +76,11 @@ pytest --cov=. --cov-report=term-missing
 | POST | /api/v1/auth/logout | Logout user |
 | POST | /api/v1/passwords/evaluate | Evaluate password |
 | POST | /api/v1/passwords/generate | Generate password |
+| GET | /api/v1/dashboard/members | List members + credentials (admin) |
+| GET | /api/v1/dashboard/audit-log | Audit log (admin) |
+| POST | /api/v1/dashboard/credentials/{id}/revoke | Revoke internal credential (admin) |
+| POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest external credential password (admin) |
+| POST | /api/v1/dashboard/credentials/{id}/restore | Restore credential (admin) |
 
 ### Generate modes
 

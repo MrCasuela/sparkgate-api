@@ -13,3 +13,8 @@ build/
 htmlcov/
 .coverage.*
 graphify-out/
+.vercel/
+AGENTS.md
+CLAUDE.md
+.claude/
+.opencode/

@@ -1,0 +1,83 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.0, pluggy-1.6.0
+rootdir: /media/pablo/hdd-linux/Proyectos-Personales/sparkgate-api
+plugins: asyncio-1.4.0, anyio-4.13.0, respx-0.23.1, cov-7.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 133 items / 12 deselected / 121 selected
+
+tests/test_ai_engine.py .............                                    [ 10%]
+tests/test_api_evaluate.py .....                                         [ 14%]
+tests/test_api_generate.py ...                                           [ 17%]
+tests/test_auth_invalid.py .                                             [ 18%]
+tests/test_auth_login.py ....                                            [ 21%]
+tests/test_auth_logout.py ...                                            [ 23%]
+tests/test_auth_register.py ....                                         [ 27%]
+tests/test_cache.py ........                                             [ 33%]
+tests/test_dashboard.py ...............                                  [ 46%]
+tests/test_e2e_extension.py ss                                           [ 47%]
+tests/test_entropy.py .....                                              [ 52%]
+tests/test_exceptions.py .........                                       [ 59%]
+tests/test_fault_tolerance.py ...                                        [ 61%]
+tests/test_generator.py ..........                                       [ 70%]
+tests/test_health.py .                                                   [ 71%]
+tests/test_hibp_client.py ......                                         [ 76%]
+tests/test_passwords_advanced.py ................                        [ 89%]
+tests/test_random_generator.py .............                             [100%]
+
+- generated xml file: /media/pablo/hdd-linux/Proyectos-Personales/sparkgate-api/docs/evidencia/junit-api.xml -
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.12.3-final-0 ________________
+
+Name                               Stmts   Miss  Cover   Missing
+----------------------------------------------------------------
+app/__init__.py                        0      0   100%
+app/api/__init__.py                    0      0   100%
+app/api/dependencies.py               30     11    63%   18-24, 35-42, 49
+app/api/routes/__init__.py             0      0   100%
+app/api/routes/auth.py                36      1    97%   31
+app/api/routes/dashboard.py           82      8    90%   34, 50, 83-84, 108, 145, 161-162
+app/api/routes/health.py              19      2    89%   16-17
+app/api/routes/passwords.py           64      3    95%   119-121
+app/core/__init__.py                   0      0   100%
+app/core/config.py                    14      0   100%
+app/core/exceptions.py                17      0   100%
+app/main.py                           21      0   100%
+app/schemas/__init__.py                0      0   100%
+app/schemas/auth.py                   28      0   100%
+app/schemas/common.py                  7      0   100%
+app/schemas/dashboard.py              28      0   100%
+app/schemas/passwords.py              29      0   100%
+app/services/__init__.py               0      0   100%
+app/services/ai_engine.py            102      4    96%   167-170
+app/services/cache.py                 43      3    93%   39-40, 46
+app/services/dashboard_repo.py        28     18    36%   11-23, 27-35, 39-40, 53-54, 66-73
+app/services/db_client.py             19      5    74%   22-26, 34-35
+app/services/entropy.py               16      0   100%
+app/services/hibp_client.py           33      3    91%   29-31
+app/services/random_generator.py      27      0   100%
+tests/__init__.py                      0      0   100%
+tests/test_ai_engine.py              147     22    85%   14-29, 49-54, 59-72, 252-258
+tests/test_api_evaluate.py            72      0   100%
+tests/test_api_generate.py            29      0   100%
+tests/test_auth_invalid.py            14      0   100%
+tests/test_auth_login.py              47      0   100%
+tests/test_auth_logout.py             33      0   100%
+tests/test_auth_register.py           47      0   100%
+tests/test_cache.py                   51      0   100%
+tests/test_dashboard.py              193      0   100%
+tests/test_e2e_extension.py           43     29    33%   39-48, 53-70, 76-85, 93-100
+tests/test_entropy.py                 38      0   100%
+tests/test_exceptions.py              47      0   100%
+tests/test_fault_tolerance.py         73      6    92%   79-87
+tests/test_generator.py               18      0   100%
+tests/test_health.py                  16      0   100%
+tests/test_health_advanced.py         35     23    34%   10-12, 17-18, 23-33, 38-46
+tests/test_hibp_client.py             68      2    97%   56-57
+tests/test_ollama.py                  38     26    32%   11-14, 20-43, 49-69
+tests/test_passwords_advanced.py     120      0   100%
+tests/test_performance.py             39     24    38%   15-22, 28-42, 48-61
+tests/test_random_generator.py        45      0   100%
+----------------------------------------------------------------
+TOTAL                               1856    190    90%
+Coverage XML written to file docs/evidencia/coverage.xml
+================ 119 passed, 2 skipped, 12 deselected in 22.18s ================
