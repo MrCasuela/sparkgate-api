@@ -51,4 +51,4 @@ fi
 # 6. Iniciar backend
 echo "[OK]   Starting SparkGate API on http://localhost:8000"
 echo "[OK]   Docs at http://localhost:8000/docs"
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --log-config logging.dev.json
