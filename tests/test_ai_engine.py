@@ -262,3 +262,46 @@ async def test_second_parse_fallback_returns_null(ollama_backend):
         result = await ai_engine.evaluate_security("Test123!", False)
     assert result["ai_score"] is None
     assert "no está disponible" in result["ai_feedback"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_sends_pwned_count_to_llm(ollama_backend):
+    """Prompt must include the HIBP occurrence count, not just the boolean."""
+    captured = {}
+
+    def handler(request):
+        captured["body"] = request.read()
+        return Response(200, json={"response": json.dumps({
+            "ai_score": 5,
+            "ai_feedback": "Contrasena comprometida.",
+            "ai_suggestions": ["Cambiala"],
+        })})
+
+    with respx.mock:
+        respx.post(f"{settings.ollama_url}/api/generate").mock(side_effect=handler)
+        result = await ai_engine.evaluate_security("Passw0rd", True, pwned_count=1234)
+
+    prompt = json.loads(captured["body"])["prompt"]
+    assert "Compromised (1234 times)" in prompt
+    assert result["ai_score"] == 5
+
+
+@pytest.mark.asyncio
+async def test_evaluate_sends_clean_status_when_not_pwned(ollama_backend):
+    captured = {}
+
+    def handler(request):
+        captured["body"] = request.read()
+        return Response(200, json={"response": json.dumps({
+            "ai_score": 80,
+            "ai_feedback": "Segura.",
+            "ai_suggestions": [],
+        })})
+
+    with respx.mock:
+        respx.post(f"{settings.ollama_url}/api/generate").mock(side_effect=handler)
+        await ai_engine.evaluate_security("SeguraP%s1", False, pwned_count=0)
+
+    prompt = json.loads(captured["body"])["prompt"]
+    assert "Not found in known breaches" in prompt
+    assert "times" not in prompt

@@ -187,10 +187,13 @@ def _safe_parse_ollama_response(raw_response: str) -> dict | None:
     return None
 
 
-async def evaluate_security(password: str, is_pwned: bool) -> dict:
+async def evaluate_security(password: str, is_pwned: bool, pwned_count: int = 0) -> dict:
+    hibp_status = "Compromised" if is_pwned else "Not found in known breaches"
+    if is_pwned and pwned_count > 0:
+        hibp_status += f" ({pwned_count} times)"
     user_prompt = (
         f"Password to analyze: {password}\n"
-        f"HIBP breach status: {'Compromised' if is_pwned else 'Not found in known breaches'}\n"
+        f"HIBP breach status: {hibp_status}\n"
         "Return JSON with ai_score, ai_feedback, ai_suggestions."
     )
 

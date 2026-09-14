@@ -56,7 +56,7 @@ async def evaluate_password(
         logger.warning("HIBP check failed for user %s: %s", user.get("id", "unknown"), e)
 
     try:
-        ai_result = await ai_engine.evaluate_security(request.password, is_compromised)
+        ai_result = await ai_engine.evaluate_security(request.password, is_compromised, pwned_count)
     except Exception as e:
         logger.error("AI evaluate failed for user %s: %s", user.get("id", "unknown"), e)
         ai_result = ai_engine.UNAVAILABLE_RESULT
