@@ -1,0 +1,24 @@
+PT14 - Precision semantica (OE3) - 2026-09-14
+Dataset: 20 passwords (10 predecibles, 10 no predecibles)
+Correctas: 19/20 = 95% (umbral >= 85%)
+
+OK  predictible=True got=True score=15 :: Juanito2026
+OK  predictible=True got=True score=20 :: maria1998
+OK  predictible=True got=True score=30 :: felipe2005
+OK  predictible=True got=True score=5 :: Password123
+OK  predictible=True got=True score=5 :: qwerty12345
+OK  predictible=True got=True score=25 :: luna2019
+OK  predictible=True got=True score=20 :: primera123
+OK  predictible=True got=True score=25 :: madrid2024
+FAIL predictible=True got=False score=75 :: familia1509
+OK  predictible=True got=True score=20 :: gato123
+OK  predictible=False got=False score=82 :: VientoAzul#84Luna
+OK  predictible=False got=False score=85 :: CuadernoMar$7Oso
+OK  predictible=False got=False score=91 :: R%ioFrio93Ventana
+OK  predictible=False got=False score=82 :: Montana+51Aguila
+OK  predictible=False got=False score=92 :: BosqueLuz@67Tigre
+OK  predictible=False got=False score=90 :: X9tR#3nO8sP
+OK  predictible=False got=False score=90 :: Km#4Lago77Sol
+OK  predictible=False got=False score=85 :: Hielo%21RioFuerte
+OK  predictible=False got=False score=75 :: Torre&Dorada48Pradera
+OK  predictible=False got=False score=85 :: Roca~12AzulLago
