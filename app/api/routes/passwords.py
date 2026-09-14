@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -22,7 +23,13 @@ KEY_EVALUATE = "evaluate"
 
 
 def _evaluate_cache_key(password: str, context: str | None) -> tuple:
-    return (KEY_EVALUATE, password, context or "", settings.ai_backend, AI_EVALUATE_VERSION)
+    return (
+        KEY_EVALUATE,
+        hashlib.sha256(password.encode()).hexdigest(),
+        context or "",
+        settings.ai_backend,
+        AI_EVALUATE_VERSION,
+    )
 
 
 @router.post("/evaluate", response_model=PasswordEvaluateResponse)

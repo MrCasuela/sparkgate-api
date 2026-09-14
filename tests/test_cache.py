@@ -68,3 +68,16 @@ def test_clear_caches_global():
     clear_caches()
     assert evaluate_cache.get(("evaluate", "x", "", "ollama", 1)) is None
     assert hibp_cache.get(("hibp", "ABCDE")) is None
+
+
+def test_evaluate_cache_key_hashes_password():
+    """Cache key must not embed the plaintext password (CU05 RNF privacidad)."""
+    from app.api.routes.passwords import _evaluate_cache_key
+
+    key1 = _evaluate_cache_key("secretpass123!", None)
+    key2 = _evaluate_cache_key("secretpass123!", None)
+    key3 = _evaluate_cache_key("secretpass123!", "banco")
+    assert key1 == key2
+    assert key1 != key3
+    assert not any("secretpass123!" in str(part) for part in key1)
+    assert len(key1[1]) == 64
