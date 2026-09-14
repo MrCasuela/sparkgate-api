@@ -131,3 +131,30 @@ async def test_evaluate_surfaces_personal_info_detection(client):
     data = response.json()
     assert "nombre propio" in data["ai_feedback"]
     assert data["ai_score"] <= 20
+
+
+@pytest.mark.asyncio
+async def test_evaluate_partial_when_ai_malformed(client):
+    """AI responds with non-JSON → 200 partial: entropy+HIBP present, ai_score null."""
+    import json as _json
+
+    hibp_url = settings.hibp_api_url.rstrip("/")
+    with respx.mock:
+        respx.get(url__startswith=f"{hibp_url}/range/").respond(200, text="")
+        respx.post(f"{settings.ollama_url}/api/generate").respond(
+            json={"response": "Lo siento, no puedo analizar esto."},
+            status_code=200,
+        )
+        async with client as ac:
+            response = await ac.post(
+                "/api/v1/passwords/evaluate",
+                json={"password": "Test123!"},
+            )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ai_score"] is None
+    assert "no está disponible" in data["ai_feedback"]
+    assert data["entropy_bits"] > 0
+    assert data["is_compromised"] is False
+    assert data["ai_suggestions"] == []

@@ -30,8 +30,8 @@ async def test_evaluate_parses_valid_ollama_response(ollama_backend):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_fallback_on_malformed_json(ollama_backend):
-    """When Ollama returns non-JSON, should fallback to entropy-based score."""
+async def test_evaluate_null_semantic_on_malformed_json(ollama_backend):
+    """Ollama returns non-JSON → ai_score null, no entropy proxy (AC3/CU05-FA2)."""
     ollama_response = {"response": "Lo siento, no puedo analizar esto."}
     with respx.mock:
         respx.post(f"{settings.ollama_url}/api/generate").respond(
@@ -39,19 +39,21 @@ async def test_evaluate_fallback_on_malformed_json(ollama_backend):
         )
         result = await ai_engine.evaluate_security("Test123!", False)
 
-    assert result["ai_score"] >= 0
-    assert result["ai_score"] <= 100
-    assert "No se pudo analizar" in result["ai_feedback"]
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]
+    assert result["ai_suggestions"] == []
 
 
 @pytest.mark.asyncio
-async def test_evaluate_raises_on_ollama_timeout(ollama_backend):
+async def test_evaluate_null_semantic_on_ai_down(ollama_backend):
     with respx.mock:
         respx.post(f"{settings.ollama_url}/api/generate").mock(
             side_effect=Exception("Connection refused")
         )
-        with pytest.raises(Exception):
-            await ai_engine.evaluate_security("Test123!", False)
+        result = await ai_engine.evaluate_security("Test123!", False)
+
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]
 
 
 @pytest.mark.asyncio
@@ -143,7 +145,7 @@ async def test_openrouter_evaluate_parses_valid_response(openrouter_backend):
 
 
 @pytest.mark.asyncio
-async def test_openrouter_evaluate_fallback_on_malformed_content(openrouter_backend):
+async def test_openrouter_evaluate_null_semantic_on_malformed_content(openrouter_backend):
     openrouter_response = {
         "choices": [{"message": {"content": "Esto no es JSON valido"}}]
     }
@@ -151,16 +153,18 @@ async def test_openrouter_evaluate_fallback_on_malformed_content(openrouter_back
         respx.post(OPENROUTER_API_URL).respond(json=openrouter_response, status_code=200)
         result = await ai_engine.evaluate_security("Test123!", False)
 
-    assert result["ai_score"] >= 0
-    assert "No se pudo analizar" in result["ai_feedback"]
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]
 
 
 @pytest.mark.asyncio
-async def test_openrouter_evaluate_raises_on_http_error(openrouter_backend):
+async def test_openrouter_evaluate_null_semantic_on_http_error(openrouter_backend):
     with respx.mock:
         respx.post(OPENROUTER_API_URL).respond(status_code=401)
-        with pytest.raises(httpx.HTTPStatusError):
-            await ai_engine.evaluate_security("Test123!", False)
+        result = await ai_engine.evaluate_security("Test123!", False)
+
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]
 
 
 @pytest.mark.asyncio
@@ -219,11 +223,13 @@ async def test_openrouter_generate_raises_on_connection_error(openrouter_backend
 
 
 @pytest.mark.asyncio
-async def test_openrouter_evaluate_raises_on_timeout(openrouter_backend):
+async def test_openrouter_evaluate_null_semantic_on_timeout(openrouter_backend):
     with respx.mock:
         respx.post(OPENROUTER_API_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
-        with pytest.raises(httpx.ReadTimeout):
-            await ai_engine.evaluate_security("Test123!", False)
+        result = await ai_engine.evaluate_security("Test123!", False)
+
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]
 
 
 @pytest.mark.asyncio
@@ -246,13 +252,13 @@ async def test_openrouter_generate_with_context(openrouter_backend):
 
 
 @pytest.mark.asyncio
-async def test_ollama_second_parse_fallback(ollama_backend):
-    """Ollama returns text with braces but broken JSON → second parser."""
-    # This content has braces but isn't valid JSON → triggers regex extraction
+async def test_second_parse_fallback_returns_null(ollama_backend):
+    """Braces but malformed JSON defeats all parsers → ai_score null (AC3)."""
     ollama_response = {"response": '{"ai_score" 85 "ai_feedback" "no commas"}'}
     with respx.mock:
         respx.post(f"{settings.ollama_url}/api/generate").respond(
             json=ollama_response, status_code=200
         )
         result = await ai_engine.evaluate_security("Test123!", False)
-    assert result["ai_score"] >= 0
+    assert result["ai_score"] is None
+    assert "no está disponible" in result["ai_feedback"]

@@ -5,7 +5,6 @@ import re
 import httpx
 
 from app.core.config import settings
-from app.services.entropy import calculate as calc_entropy
 
 logger = logging.getLogger("sparkgate.ai_engine")
 
@@ -75,6 +74,14 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Bump this when prompts change so cached evaluate results are invalidated.
 AI_EVALUATE_VERSION = 1
+
+# Returned when the semantic analysis cannot be completed (service failure or
+# unparseable model response). Entropy/HIBP dimensions remain available.
+UNAVAILABLE_RESULT = {
+    "ai_score": None,
+    "ai_feedback": "El análisis semántico no está disponible.",
+    "ai_suggestions": [],
+}
 
 # Tuned for local inference: bound context and output length to cut latency
 # without changing semantic quality. Output cap per purpose.
@@ -191,30 +198,19 @@ async def evaluate_security(password: str, is_pwned: bool) -> dict:
         raw = await _call_ai(EVALUATE_SYSTEM_PROMPT, user_prompt, num_predict=EVALUATE_NUM_PREDICT)
     except httpx.ReadTimeout:
         logger.error("AI timeout during evaluate_security")
-        raise
+        return UNAVAILABLE_RESULT
     except httpx.HTTPStatusError as e:
         logger.error("AI HTTP error during evaluate_security: %s", e)
-        raise
+        return UNAVAILABLE_RESULT
     except Exception as e:
         logger.error("AI connection error during evaluate_security: %s", e)
-        raise
+        return UNAVAILABLE_RESULT
 
     result = _safe_parse_ollama_response(raw)
 
     if result is None:
         logger.warning("Failed to parse Ollama response: %.200s", raw)
-        # Fallback: derive score from entropy
-        entropy = calc_entropy(password)
-        entropy_score = min(100, int(entropy / 1.5))
-        return {
-            "ai_score": entropy_score,
-            "ai_feedback": "No se pudo analizar semanticamente. Evaluacion basada solo en complejidad matematica.",
-            "ai_suggestions": [
-                "Usa una combinacion de mayusculas, minusculas, numeros y simbolos",
-                "Evita palabras del diccionario o nombres propios",
-                "Usa al menos 12 caracteres",
-            ],
-        }
+        return UNAVAILABLE_RESULT
 
     return {
         "ai_score": result.get("ai_score", 50),

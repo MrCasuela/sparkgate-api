@@ -59,14 +59,11 @@ async def evaluate_password(
         ai_result = await ai_engine.evaluate_security(request.password, is_compromised)
     except Exception as e:
         logger.error("AI evaluate failed for user %s: %s", user.get("id", "unknown"), e)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="AI service unavailable. Mathematical analysis completed but semantic analysis failed.",
-        )
+        ai_result = ai_engine.UNAVAILABLE_RESULT
 
     logger.info(
-        "Evaluate: entropy=%.1f, compromised=%s, score=%d",
-        entropy_bits, is_compromised, ai_result.get("ai_score", 0),
+        "Evaluate: entropy=%.1f, compromised=%s, ai_score=%s",
+        entropy_bits, is_compromised, ai_result.get("ai_score"),
     )
     response = PasswordEvaluateResponse(
         is_compromised=is_compromised,
