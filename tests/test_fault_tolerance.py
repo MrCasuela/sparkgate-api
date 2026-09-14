@@ -100,18 +100,23 @@ async def test_health_degraded_when_services_down(client):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_ai_fails_returns_502(client, ollama_backend):
-    """When Ollama is down, evaluate returns 502 with partial response."""
+async def test_evaluate_returns_partial_when_ai_down(client, ollama_backend):
+    """Ollama down → 200 partial: entropy+HIBP present, ai_score null (CU05-FA2)."""
+    hibp_url = f"{settings.hibp_api_url}/range/".rstrip("/")
     with respx.mock:
         respx.post(f"{settings.ollama_url}/api/generate").mock(
             side_effect=Exception("Ollama not responding")
         )
+        respx.get(url__startswith=hibp_url).respond(200, text="")
         async with client as ac:
             response = await ac.post(
                 "/api/v1/passwords/evaluate",
                 json={"password": "Test123!"},
             )
 
-    assert response.status_code == 502
+    assert response.status_code == 200
     data = response.json()
-    assert "AI service unavailable" in data["detail"]
+    assert data["entropy_bits"] > 0
+    assert data["is_compromised"] is False
+    assert data["ai_score"] is None
+    assert "no está disponible" in data["ai_feedback"]

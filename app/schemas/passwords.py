@@ -11,7 +11,7 @@ class PasswordEvaluateResponse(BaseModel):
     pwned_count: int
     entropy_bits: float
     entropy_threshold_met: bool
-    ai_score: int = Field(..., ge=0, le=100)
+    ai_score: int | None = Field(default=None, ge=0, le=100)
     ai_feedback: str
     ai_suggestions: list[str]
 
