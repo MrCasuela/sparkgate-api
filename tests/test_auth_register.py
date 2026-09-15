@@ -40,7 +40,7 @@ async def test_register_sets_plan_gratuito_and_returns_token(client, monkeypatch
         session=SimpleNamespace(access_token="tok-abc"),
     )
     monkeypatch.setattr(
-        auth_routes, "get_supabase", lambda: _mock_supabase(sign_up_return=fake_result)
+        auth_routes, "create_auth_client", lambda: _mock_supabase(sign_up_return=fake_result)
     )
     async with client as ac:
         response = await ac.post(
@@ -61,7 +61,7 @@ async def test_register_duplicate_email_via_empty_identities(client, monkeypatch
         session=None,
     )
     monkeypatch.setattr(
-        auth_routes, "get_supabase", lambda: _mock_supabase(sign_up_return=fake_result)
+        auth_routes, "create_auth_client", lambda: _mock_supabase(sign_up_return=fake_result)
     )
     async with client as ac:
         response = await ac.post(
@@ -76,7 +76,7 @@ async def test_register_duplicate_email_via_empty_identities(client, monkeypatch
 async def test_register_duplicate_email_via_exception(client, monkeypatch):
     monkeypatch.setattr(
         auth_routes,
-        "get_supabase",
+        "create_auth_client",
         lambda: _mock_supabase(sign_up_side_effect=Exception("User already registered")),
     )
     async with client as ac:
