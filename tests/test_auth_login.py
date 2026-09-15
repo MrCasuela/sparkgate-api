@@ -6,6 +6,7 @@ from httpx import AsyncClient, ASGITransport
 
 from app.main import app
 from app.api.routes import auth as auth_routes
+from app.services import db_client
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ async def test_login_returns_token_and_premium_flag(client, monkeypatch):
         session=SimpleNamespace(access_token="tok-abc"),
     )
     monkeypatch.setattr(
-        auth_routes, "get_supabase", lambda: _mock_supabase(sign_in_return=fake_result)
+        auth_routes, "create_auth_client", lambda: _mock_supabase(sign_in_return=fake_result)
     )
     async with client as ac:
         response = await ac.post(
@@ -51,7 +52,7 @@ async def test_login_defaults_premium_false_when_missing_metadata(client, monkey
         session=SimpleNamespace(access_token="tok-def"),
     )
     monkeypatch.setattr(
-        auth_routes, "get_supabase", lambda: _mock_supabase(sign_in_return=fake_result)
+        auth_routes, "create_auth_client", lambda: _mock_supabase(sign_in_return=fake_result)
     )
     async with client as ac:
         response = await ac.post(
@@ -66,7 +67,7 @@ async def test_login_defaults_premium_false_when_missing_metadata(client, monkey
 async def test_login_wrong_credentials_returns_401(client, monkeypatch):
     monkeypatch.setattr(
         auth_routes,
-        "get_supabase",
+        "create_auth_client",
         lambda: _mock_supabase(sign_in_side_effect=Exception("Invalid login credentials")),
     )
     async with client as ac:
@@ -76,6 +77,40 @@ async def test_login_wrong_credentials_returns_401(client, monkeypatch):
         )
     assert response.status_code == 401
     assert "Invalid login credentials" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_login_never_signs_in_on_the_shared_client(client, monkeypatch):
+    """supabase-py rewrites a client's Authorization header on SIGNED_IN, so a login
+    on the shared singleton would leave it acting as that user process-wide."""
+    fake_result = SimpleNamespace(
+        user=SimpleNamespace(id="user-123", user_metadata={}),
+        session=SimpleNamespace(access_token="tok-abc"),
+    )
+    shared = MagicMock()
+    monkeypatch.setattr(db_client, "_supabase_client", shared)
+
+    issued = []
+
+    def _factory():
+        mock_client = _mock_supabase(sign_in_return=fake_result)
+        issued.append(mock_client)
+        return mock_client
+
+    monkeypatch.setattr(auth_routes, "create_auth_client", _factory)
+
+    async with client as ac:
+        for _ in range(2):
+            response = await ac.post(
+                "/api/v1/auth/login",
+                json={"email": "user@example.com", "password": "Sup3rSecret!"},
+            )
+            assert response.status_code == 200
+
+    shared.auth.sign_in_with_password.assert_not_called()
+    assert len(issued) == 2 and issued[0] is not issued[1]
+    for mock_client in issued:
+        mock_client.auth.close.assert_called_once()
 
 
 @pytest.mark.asyncio

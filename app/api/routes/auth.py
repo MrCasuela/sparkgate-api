@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -8,14 +10,16 @@ from app.schemas.auth import (
     RegisterRequest,
     RegisterResponse,
 )
-from app.services.db_client import get_supabase, get_supabase_admin
+from app.services.db_client import create_auth_client, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+logger = logging.getLogger("sparkgate.auth")
 
 
 @router.post("/register", response_model=RegisterResponse)
 async def register(body: RegisterRequest):
-    supabase = get_supabase()
+    supabase = create_auth_client()
     try:
         result = supabase.auth.sign_up({
             "email": body.email,
@@ -29,6 +33,8 @@ async def register(body: RegisterRequest):
                 detail="Este correo ya está registrado. Inicia sesión con tu cuenta existente.",
             )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    finally:
+        supabase.auth.close()
 
     # Supabase returns a user with no identities (instead of raising) when the
     # email already belongs to a confirmed account, to avoid email enumeration.
@@ -48,20 +54,23 @@ async def register(body: RegisterRequest):
 
 @router.post("/login", response_model=LoginResponse)
 async def login(body: LoginRequest):
-    supabase = get_supabase()
+    supabase = create_auth_client()
     try:
         result = supabase.auth.sign_in_with_password({
             "email": body.email,
             "password": body.password,
         })
-        user_metadata = result.user.user_metadata or {}
-        return LoginResponse(
-            access_token=result.session.access_token,
-            user_id=result.user.id,
-            premium=user_metadata.get("premium", False),
-        )
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    finally:
+        supabase.auth.close()
+
+    user_metadata = result.user.user_metadata or {}
+    return LoginResponse(
+        access_token=result.session.access_token,
+        user_id=result.user.id,
+        premium=user_metadata.get("premium", False),
+    )
 
 
 @router.post("/logout")
@@ -78,5 +87,7 @@ async def logout(
     try:
         get_supabase_admin().auth.admin.sign_out(credentials.credentials, scope="global")
     except Exception as e:
+        # A GoTrue outage and a bad token both land here; only the log tells them apart.
+        logger.error("Logout sign_out failed: %s", e)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return {"message": "Logged out"}
