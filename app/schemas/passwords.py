@@ -9,6 +9,7 @@ class PasswordEvaluateRequest(BaseModel):
 class PasswordEvaluateResponse(BaseModel):
     is_compromised: bool
     pwned_count: int
+    hibp_available: bool = Field(default=True, description="False si la API HIBP no respondió en esta evaluación (CU05-FA1)")
     entropy_bits: float
     entropy_threshold_met: bool
     ai_score: int | None = Field(default=None, ge=0, le=100)
