@@ -1,5 +1,6 @@
 import hashlib
 
+import httpx
 import pytest
 import respx
 
@@ -109,3 +110,36 @@ async def test_check_password_returns_compromised():
 
     assert is_compromised is True
     assert count == 42
+
+
+@pytest.mark.asyncio
+async def test_request_url_contains_only_5char_prefix():
+    """AC3: el payload enviado a HIBP es solo el prefijo de 5 hex, nunca la
+    contraseña ni el hash completo."""
+    from app.core.config import settings
+    from app.services.hibp_client import check_password
+
+    password = "UnSecretoMuyLargo#99"
+    sha1 = hashlib.sha1(password.encode()).hexdigest().upper()
+    prefix = sha1[:5]
+    captured = {}
+
+    def handler(request):
+        captured["url"] = str(request.url)
+        return httpx.Response(200, text="")
+
+    with respx.mock:
+        respx.get(url__startswith=f"{settings.hibp_api_url}/range/").mock(
+            side_effect=handler
+        )
+        await check_password(password)
+
+    url = captured["url"]
+    assert url.endswith(f"/range/{prefix}")
+    assert password not in url
+    assert sha1 not in url
+    hex_parts = [
+        part for part in url.split("/")
+        if len(part) >= 5 and all(c in "0123456789ABCDEF" for c in part)
+    ]
+    assert hex_parts == [prefix]

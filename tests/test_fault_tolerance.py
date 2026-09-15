@@ -69,6 +69,7 @@ async def test_evaluate_returns_partial_when_hibp_down(client, ollama_backend):
     assert data["entropy_bits"] > 0
     assert data["is_compromised"] is False
     assert data["pwned_count"] == 0
+    assert data["hibp_available"] is False
     assert "ai_score" in data
     assert "ai_feedback" in data
 
@@ -118,5 +119,6 @@ async def test_evaluate_returns_partial_when_ai_down(client, ollama_backend):
     data = response.json()
     assert data["entropy_bits"] > 0
     assert data["is_compromised"] is False
+    assert data["hibp_available"] is True
     assert data["ai_score"] is None
     assert "no está disponible" in data["ai_feedback"]

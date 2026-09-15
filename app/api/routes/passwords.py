@@ -50,10 +50,12 @@ async def evaluate_password(
     entropy_threshold_met = meets_threshold(request.password)
 
     is_compromised, pwned_count = False, 0
+    hibp_available = True
     try:
         is_compromised, pwned_count = await hibp_client.check_password(request.password)
     except Exception as e:
         logger.warning("HIBP check failed for user %s: %s", user.get("id", "unknown"), e)
+        hibp_available = False
 
     try:
         ai_result = await ai_engine.evaluate_security(request.password, is_compromised, pwned_count)
@@ -68,6 +70,7 @@ async def evaluate_password(
     response = PasswordEvaluateResponse(
         is_compromised=is_compromised,
         pwned_count=pwned_count,
+        hibp_available=hibp_available,
         entropy_bits=entropy_bits,
         entropy_threshold_met=entropy_threshold_met,
         ai_score=ai_result["ai_score"],
