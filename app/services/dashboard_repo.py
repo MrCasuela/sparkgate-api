@@ -62,6 +62,20 @@ def insert_audit_log(
     ).execute()
 
 
+def detach_supabase_user(user_id: str) -> int:
+    """Clear supabase_user_id on any credential linked to a deleted account
+    (Ley 21.719 erasure), without touching the dashboard_members governance
+    record itself — that row tracks the org's own offboarding history (HU16)."""
+    admin = get_supabase_admin()
+    result = (
+        admin.table(CREDENTIALS_TABLE)
+        .update({"supabase_user_id": None, "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("supabase_user_id", user_id)
+        .execute()
+    )
+    return len(result.data)
+
+
 def list_audit_log() -> list[dict]:
     admin = get_supabase_admin()
     result = (

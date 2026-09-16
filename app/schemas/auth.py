@@ -35,6 +35,11 @@ class LoginResponse(BaseModel):
     premium: bool = Field(default=False)
 
 
+class DeleteAccountRequest(BaseModel):
+    confirm_email: str
+    password: str
+
+
 class UserInfo(BaseModel):
     id: str
     email: str | None = None
