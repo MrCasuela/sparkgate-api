@@ -199,18 +199,19 @@ Backlog: 15 HU (`Informe` §Product Backlog). Cobertura evaluada contra **este r
 | HU14 | Extensión | Detectar campos de contraseña | — | — | Frontend (no aplica backend) |
 | HU15 | Extensión | Interfaz simple/clara | — | — | Frontend (no aplica backend) |
 | HU16 | Dashboard | Panel de gobernanza de credenciales (interna vs externa) | `test_dashboard` | ✅ | Cubierta (agregada al backlog en Jira SCRUM-25 después de este documento) |
+| HU17 | Vault | Resguardar y consultar credencial propia (CU07) | `test_vault_crypto`, `test_audit_chain`, `test_api_vault`, `test_auth_account_delete` + E2E real (`scripts/e2e_vault_check.py`, evidencia en `docs/evidencia/hu17-e2e.txt`, 14/14 pasos OK) | ✅ | Cubierta (AC1-AC5; agregada en SP-2 después de este documento). Paso AC5 con KEK caída queda como sub-check manual documentado en el propio script — reinicia el proceso del backend, algo que un script no debe hacerle a un proceso que no le pertenece |
 
 Resumen de cobertura de HU (backend):
 
 | Universo | Cantidad |
 |---|---|
 | HU del backlog original (informe) | 15 |
-| HU agregada después en Jira | 1 (HU16, SCRUM-25) |
+| HU agregada después en Jira | 2 (HU16 SCRUM-25, HU17 SP-2) |
 | HU frontend (repo extensión, no aplica aquí) | 4 (HU08, HU13, HU14, HU15) |
-| HU backend aplicables | 12 (11 del backlog original + HU16) |
-| HU backend cubiertas (✅) | 12 |
+| HU backend aplicables | 13 (11 del backlog original + HU16 + HU17) |
+| HU backend cubiertas (✅) | 13 |
 | HU backend parciales (⚠️) | 0 |
-| **% cobertura backend** | **12/12 = 100%** |
+| **% cobertura backend** | **13/13 = 100%** |
 
 Nota metodológica: la cobertura de *líneas* (91%) y la cobertura de *HU* (100%
 backend) son métricas distintas; se reportan ambas, no se mezclan. HU12 se

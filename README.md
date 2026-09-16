@@ -74,6 +74,7 @@ datos y flujos en [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
 | POST | /api/v1/auth/register | Register user |
 | POST | /api/v1/auth/login | Login user |
 | POST | /api/v1/auth/logout | Logout user |
+| DELETE | /api/v1/auth/account | Delete own account + all vault data (irreversible, Ley 21.719) |
 | POST | /api/v1/passwords/evaluate | Evaluate password |
 | POST | /api/v1/passwords/generate | Generate password |
 | GET | /api/v1/dashboard/members | List members + credentials (admin) |
@@ -81,6 +82,12 @@ datos y flujos en [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
 | POST | /api/v1/dashboard/credentials/{id}/revoke | Revoke internal credential (admin) |
 | POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest external credential password (admin) |
 | POST | /api/v1/dashboard/credentials/{id}/restore | Restore credential (admin) |
+| POST | /api/v1/vault/items | Save an encrypted credential (HU17 AC1/AC2) |
+| GET | /api/v1/vault/items | List own credentials (metadata only, never decrypted) |
+| GET | /api/v1/vault/items/{id} | Decrypt and return own credential (HU17 AC3) |
+| DELETE | /api/v1/vault/items/{id} | Delete one credential (Ley 21.719, works without the master key) |
+| DELETE | /api/v1/vault/items | Purge all own credentials (Ley 21.719) |
+| GET | /api/v1/vault/audit | Own vault audit trail (HU19 hash chain) |
 
 ### Generate modes
 
