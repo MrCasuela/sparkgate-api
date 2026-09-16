@@ -3,13 +3,15 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
-from app.api.dependencies import security_scheme
+from app.api.dependencies import require_user, security_scheme
 from app.schemas.auth import (
+    DeleteAccountRequest,
     LoginRequest,
     LoginResponse,
     RegisterRequest,
     RegisterResponse,
 )
+from app.services import dashboard_repo, vault_repo
 from app.services.db_client import create_auth_client, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -91,3 +93,43 @@ async def logout(
         logger.error("Logout sign_out failed: %s", e)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
     return {"message": "Logged out"}
+
+
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(body: DeleteAccountRequest, user: dict = Depends(require_user)):
+    """Irreversible account + data erasure (Ley 21.719 right to erasure). Requires
+    the caller to type their own email exactly (catches accidental clicks for free,
+    before any network round-trip) and re-authenticate with their password (a stolen
+    Bearer token alone can't destroy the account). The Supabase user is deleted last,
+    so a failure partway through never leaves an account with no data behind it."""
+    user_id = user["id"]
+    session_email = (user.get("email") or "").strip().lower()
+
+    if body.confirm_email.strip().lower() != session_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debes escribir tu correo exactamente para confirmar la eliminación.",
+        )
+
+    supabase = create_auth_client()
+    try:
+        supabase.auth.sign_in_with_password({"email": session_email, "password": body.password})
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta.")
+    finally:
+        supabase.auth.close()
+
+    deleted_count = vault_repo.delete_all_items(user_id)
+    vault_repo.insert_audit(
+        user_id=user_id, item_id=None, action="eliminar_cuenta", result="ok", deleted_count=deleted_count
+    )
+    dashboard_repo.detach_supabase_user(user_id)
+
+    try:
+        get_supabase_admin().auth.admin.delete_user(user_id)
+    except Exception as e:
+        logger.error("Account deletion: delete_user failed for %s after data purge: %s", user_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Tus datos fueron eliminados, pero la cuenta no pudo cerrarse. Contacta soporte.",
+        )

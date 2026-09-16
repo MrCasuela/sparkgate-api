@@ -150,6 +150,7 @@ flowchart TB
 | Auth | `app/api/routes/auth.py` | Proxy a Supabase Auth: register / login / logout |
 | Passwords | `app/api/routes/passwords.py` | Evaluar (3 dimensiones) y generar (AI/random) |
 | Dashboard | `app/api/routes/dashboard.py` | Offboarding SP-1: members, audit-log, revoke/suggest/restore |
+| Vault | `app/api/routes/vault.py` | HU17: guardar/listar/consultar/eliminar credencial propia cifrada |
 | Health | `app/api/routes/health.py` | Estado de Ollama (raíz) + sesión Supabase |
 | `ai_engine` | `app/services/ai_engine.py` | Prompts + llamada LLM + parseo JSON (Ollama/OpenRouter) |
 | `hibp_client` | `app/services/hibp_client.py` | SHA-1 truncado + consulta `/range/{prefix}` (caché por prefijo, TTL 24h) |
@@ -157,6 +158,9 @@ flowchart TB
 | `entropy` | `app/services/entropy.py` | `H = L × log₂(R)`, umbral 60 bits |
 | `random_generator` | `app/services/random_generator.py` | Generación criptográfica (`secrets`) |
 | `dashboard_repo` | `app/services/dashboard_repo.py` | CRUD sobre tablas del dashboard |
+| `vault_repo` | `app/services/vault_repo.py` | CRUD sobre `vault_items` / `vault_audit_log`, siempre filtrado por `user_id` |
+| `vault_crypto` | `app/services/vault_crypto.py` | Envelope encryption AES-256-GCM (DEK por ítem, KEK en `.env`), AAD=`user_id` |
+| `audit_chain` | `app/services/audit_chain.py` | Registro encadenado por hash SHA-256 (base de HU19) |
 | `db_client` | `app/services/db_client.py` | Clientes Supabase perezosos: anon y service_role |
 | Config | `app/core/config.py` | `Settings` desde `.env` |
 | Excepciones | `app/core/exceptions.py` | Tipos 502/503 + handlers JSON |
@@ -165,9 +169,12 @@ flowchart TB
 
 Todas las respuestas de error usan `{"detail": string}` (compatible con el esquema
 `ErrorResponse` en `app/schemas/common.py`). Códigos usados en rutas: `400` (bad
-request / credencial ya revocada), `401` (sin token o inválido), `403` (premium /
-admin requeridos), `404` (credencial inexistente), `409` (email ya registrado),
-`502` (servicio AI fuera de servicio / entropía insuficiente tras reintentos).
+request / credencial ya revocada / confirmación de correo incorrecta al borrar
+cuenta), `401` (sin token, inválido, o contraseña incorrecta al re-autenticar),
+`403` (premium / admin requeridos), `404` (credencial inexistente o ajena),
+`409` (email ya registrado), `502` (servicio AI fuera de servicio / entropía
+insuficiente tras reintentos / falla al borrar el usuario tras purgar sus
+datos), `503` (módulo Vault sin clave maestra configurada, HU17 AC5).
 
 ## 5. Modelo de datos
 
@@ -180,6 +187,9 @@ La base vive en Supabase (PostgreSQL). Se distinguen dos zonas:
 - **Tablas `dashboard_*`** — creadas por `sql/dashboard_schema.sql`, accesibles solo
   desde el backend con la clave `service_role` (sin RLS; el gateo de admin es
   aplicación-side con `require_admin`).
+- **Tablas `vault_*`** — creadas por `sql/vault_schema.sql`, mismo modelo de acceso
+  (`service_role`, sin RLS), pero gateado por `require_user` y un `.eq("user_id", ...)`
+  aplicado en cada consulta de `vault_repo.py`, no por rol.
 
 ```mermaid
 erDiagram
@@ -222,6 +232,36 @@ erDiagram
         text action
         timestamptz created_at "default now()"
     }
+
+    auth_users ||..o{ vault_items : "user_id (lógica, sin FK)"
+    auth_users ||..o{ vault_audit_log : "user_id (lógica, sin FK)"
+
+    vault_items {
+        uuid id PK "gen_random_uuid()"
+        uuid user_id "dueño, sin FK a auth.users"
+        text service_name "not null"
+        text username "nullable"
+        text ciphertext "AES-256-GCM, base64"
+        text nonce "base64"
+        text wrapped_dek "DEK envuelta con la KEK, base64"
+        text dek_nonce "base64"
+        int kek_version "default 1"
+        timestamptz created_at "default now()"
+        timestamptz updated_at "default now()"
+    }
+
+    vault_audit_log {
+        bigserial seq "orden de la cadena"
+        uuid id PK "gen_random_uuid()"
+        uuid user_id "seudónimo tras borrar la cuenta"
+        uuid item_id "nullable"
+        text action "guardar|listar|consultar|consultar_denegado|eliminar|eliminar_denegado|eliminar_todo|eliminar_cuenta"
+        text result "ok|denegado|error"
+        int deleted_count "solo eliminar_todo/eliminar_cuenta"
+        text prev_hash UK "hash de la entrada anterior"
+        text entry_hash "sha256(prev_hash + payload)"
+        timestamptz created_at "default now()"
+    }
 ```
 
 **Observaciones de diseño** (decisiones explícitas, no omisiones):
@@ -235,6 +275,18 @@ erDiagram
 - Índices: `dashboard_credentials(member_id)` y `dashboard_audit_log(created_at desc)`.
 - Sin RLS: acceso exclusivo vía `service_role` (cliente `get_supabase_admin()`),
   nunca expuesto a callers no-admin.
+- `vault_items` nunca guarda el secreto en claro: solo el sobre cifrado
+  (`ciphertext`/`nonce`/`wrapped_dek`/`dek_nonce`). El AAD del cifrado es el
+  `user_id`, así que mover una fila a otro dueño rompe el tag GCM aunque se
+  conozca la KEK (HU17 AC2/AC3).
+- `vault_audit_log` es una cadena hash (HU19): cada `entry_hash` cubre
+  `prev_hash` + el payload. El payload es **seudónimo a propósito** (solo
+  UUIDs y enums, nunca `service_name` ni secretos) para que borrar una cuenta
+  (Ley 21.719) nunca obligue a romper la cadena — el `user_id` simplemente
+  deja de mapear a una persona real. `prev_hash` es `unique`: dos escrituras
+  concurrentes sobre la misma cola fallan la segunda en vez de bifurcar la
+  cadena en silencio.
+- Índices: `vault_items(user_id)` y `vault_audit_log(user_id)`.
 
 ## 6. Flujos clave
 
@@ -365,6 +417,16 @@ se hace por el panel (ban + rotación de contraseña).
 | Guardas de offboarding | `dashboard.py` | no revocar propia cuenta admin; solo interna |
 | Sin contraseñas en el audit log | `dashboard.py`, `dashboard_repo.py` | AC4 — solo actor/acción |
 | CORS por orígenes exactos + regex | `main.py` | wildcards traducidos a regex |
+| Envelope encryption (DEK/KEK) | `vault_crypto.py` | AES-256-GCM, KEK en `.env`, nunca en DB ni logs (HU17 AC2) |
+| Ciphertext ligado al dueño | `vault_crypto.py` | AAD=`user_id`; `InvalidTag` si se descifra bajo otro dueño (AC3) |
+| Vault rechaza sin KEK, sin persistir en claro | `vault.py` | `is_available()` chequeado antes de cualquier escritura (AC5) |
+| Ownership explícito, sin RLS | `vault_repo.py` | `.eq("user_id", ...)` en cada lectura/borrado del vault |
+| Enumeración de IDs ajenos evitada | `vault.py` | ítem inexistente y ajeno responden ambos 404, nunca 403 |
+| Auditoría del vault sin secretos ni service_name | `vault.py`, `audit_chain.py` | payload seudónimo: solo UUIDs y enums (AC4, HU19) |
+| Cadena de auditoría detecta alteración | `audit_chain.py` | `entry_hash = sha256(prev_hash + payload)`, `verify_chain` recalcula todo |
+| Borrado nunca depende de la KEK | `vault.py` | DELETE de ítem/purga funciona con `is_available() == False` (Ley 21.719) |
+| Borrado de cuenta con doble confirmación | `auth.py` | correo exacto (400) + contraseña re-autenticada (401) antes de borrar nada |
+| Borrado de cuenta no deja datos huérfanos | `auth.py` | orden: purgar vault → registrar auditoría → desasociar dashboard → `delete_user` al final |
 
 ## 8. Vista de despliegue
 
@@ -398,6 +460,15 @@ flowchart LR
   invalidar al cambiar prompts; `generate` nunca se cachea (riesgo de reuso).
 - Seed del panel SP-1: `python scripts/seed_dashboard_demo.py` (idempotente,
   requiere `SUPABASE_SERVICE_ROLE_KEY`).
+- Esquema del vault (HU17): `python scripts/apply_vault_schema.py` — aplica
+  `sql/vault_schema.sql` vía `SUPABASE_DB_URL` si está configurada (conexión
+  directa con `psycopg`), o imprime el SQL para pegar a mano en el editor de
+  Supabase si no. Idempotente, verifica al final contra la API real.
+- Verificación E2E del vault (HU17): `python scripts/e2e_vault_check.py`
+  contra el backend levantado y Supabase real (no mocks) — crea dos cuentas
+  descartables vía Admin API, guarda/consulta/audita/borra, y comprueba
+  `verify_chain`. `E2E_ALLOW_ACCOUNT_DELETE=1` suma el flujo de borrado de
+  cuenta. Evidencia en `docs/evidencia/hu17-e2e.txt`.
 
 ## 9. Catálogo de endpoints (mapeo real)
 
@@ -414,6 +485,13 @@ flowchart LR
 | POST | `/api/v1/dashboard/credentials/{id}/revoke` | admin | `dashboard_repo` + Admin API | interna |
 | POST | `/api/v1/dashboard/credentials/{id}/suggest` | admin | `dashboard_repo` | externa |
 | POST | `/api/v1/dashboard/credentials/{id}/restore` | admin | `dashboard_repo` + Admin API | interna/externa |
+| POST | `/api/v1/vault/items` | usuario | `vault_crypto` + `vault_repo` | 503 si falta la KEK (AC5) |
+| GET | `/api/v1/vault/items` | usuario | `vault_repo` | metadatos, nunca descifra |
+| GET | `/api/v1/vault/items/{id}` | usuario | `vault_repo` + `vault_crypto` | 404 si no es del dueño (AC3) |
+| DELETE | `/api/v1/vault/items/{id}` | usuario | `vault_repo` | no exige KEK (Ley 21.719) |
+| DELETE | `/api/v1/vault/items` | usuario | `vault_repo` | purga total, `deleted_count` |
+| GET | `/api/v1/vault/audit` | usuario | `vault_repo` | propio, base de HU19 |
+| DELETE | `/api/v1/auth/account` | usuario | `vault_repo` + `dashboard_repo` + Admin API | irreversible, confirma correo + password |
 
 ## 10. Estructura de directorios
 
@@ -421,13 +499,17 @@ flowchart LR
 app/
 ├── main.py                 # Ensamblado FastAPI: CORS, routers, exception handlers
 ├── api/
-│   ├── dependencies.py     # verify_token / require_premium / require_admin
-│   └── routes/             # Coordinadores (auth, passwords, dashboard, health)
+│   ├── dependencies.py     # verify_token / require_user / require_premium / require_admin
+│   └── routes/             # Coordinadores (auth, passwords, dashboard, vault, health)
 ├── core/                   # config.py (Settings) + exceptions.py (handlers 502/503)
-├── schemas/                # Pydantic: auth, common, passwords, dashboard
+├── schemas/                # Pydantic: auth, common, passwords, dashboard, vault
 └── services/               # Todo I/O: ai_engine, hibp_client, entropy, cache,
-                            #   random_generator, dashboard_repo, db_client
+                            #   random_generator, dashboard_repo, vault_repo,
+                            #   vault_crypto, audit_chain, db_client
 sql/dashboard_schema.sql    # DDL del panel de offboarding
+sql/vault_schema.sql        # DDL del vault (HU17) + auditoría encadenada (HU19)
 scripts/seed_dashboard_demo.py
+scripts/apply_vault_schema.py   # aplica sql/vault_schema.sql (psycopg o instrucciones manuales)
+scripts/e2e_vault_check.py      # verificación E2E del vault contra backend + Supabase reales
 tests/                      # Ver suite en AGENTS.md
 ```

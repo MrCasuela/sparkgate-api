@@ -1,0 +1,28 @@
+HU17 E2E — 2026-09-16T19:50:41.860906+00:00
+Base URL: http://localhost:8000
+
+PASS  1. Login usuario A
+PASS  2. POST /vault/items -> 201
+PASS  3. La fila cruda no contiene el password ni las notas en claro
+PASS  4. GET propio -> 200 con el password original
+PASS  5a. GET cruzado (B lee ítem de A) -> 404
+PASS  5b. Última entrada de auditoría del ítem es consultar_denegado
+PASS  6. GET /vault/audit propio no contiene el password ni las notas
+PASS  7. verify_chain('vault_audit_log') == True (broken_id=None)
+
+8. MANUAL — no automatizado (requiere reiniciar el backend sin VAULT_MASTER_KEY,
+   y este script no reinicia procesos que no le pertenecen):
+   a) Comentar VAULT_MASTER_KEY en .env, reiniciar el backend.
+   b) POST /api/v1/vault/items -> esperar 503, confirmar que vault_items no creció.
+   c) DELETE /api/v1/vault/items/{id} de un ítem existente -> esperar 204 igual
+      (el borrado no depende de la KEK).
+   d) Descomentar VAULT_MASTER_KEY, reiniciar el backend antes de seguir usándolo.
+
+PASS  9a. confirm_email incorrecto -> 400
+PASS  9b. password incorrecta -> 401
+PASS  9c. confirm_email + password correctos -> 204
+PASS  9d. vault_items del usuario borrado queda vacío
+PASS  9e. Login con la cuenta borrada -> ya no funciona
+PASS  9f. verify_chain sigue True tras el borrado de cuenta (broken_id=None)
+
+14/14 pasos OK.

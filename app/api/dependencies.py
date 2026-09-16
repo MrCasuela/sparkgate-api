@@ -29,6 +29,14 @@ async def verify_token(
         )
 
 
+async def require_user(
+    user: dict | None = Depends(verify_token),
+) -> dict:
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    return user
+
+
 async def require_premium(
     user: dict | None = Depends(verify_token),
 ) -> dict:
