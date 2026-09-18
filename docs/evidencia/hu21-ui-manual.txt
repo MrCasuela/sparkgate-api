@@ -1,0 +1,31 @@
+HU21 — verificación manual de UI (extensión Chrome)
+Fecha: 2026-09-18
+Ejecutó: Pablo, en el navegador, contra backend local (localhost:8000) y
+Supabase real. Fuente: reporte del propio ejecutor; sin capturas.
+
+AC4 — botón "Panel de administración" según el tipo de cuenta
+  PASS  Cuenta personal (pablosepu3@gmail.com): el botón NO aparece.
+  PASS  Cuenta empresa (admin@pyme-demo.sparkgate.test, Ana): el botón aparece
+        y abre el panel.
+  Nota: se verificó por decodificación del access token real del login de Ana
+        que el JWT de GoTrue de este proyecto SÍ incluye
+        user_metadata.type_account, por lo que el gateo funciona con el claim
+        y el respaldo en chrome.storage no es necesario aquí.
+
+AC5 — bóveda del trabajador desde el panel
+  PASS  Desde el panel de Ana se puede ver la bóveda de los trabajadores.
+  Sin precisar: si se abrió algún ítem. Bruno, Carla y Diego no tienen ítems
+        en su bóveda (solo Ana tiene uno, "Github", de HU17), así que el listado
+        de esos tres debe mostrar "no guardó credenciales" / "sin cuenta
+        vinculada" (Diego).
+
+PENDIENTE de ejecutar en la UI
+  AC2  Alta de trabajador: modal con la contraseña temporal (una sola vez,
+       con aviso), el trabajador aparece en la lista y puede iniciar sesión.
+  AC6  "Ver contraseña": modal con el valor guardado y el aviso de dato personal.
+  AC7  Desde la UI: al iniciar sesión el trabajador, su auditoría muestra quién
+       abrió su credencial.
+  ---  Tabla de auditoría del panel: etiquetas de las acciones nuevas y export
+       CSV sin errores con entradas de bóveda (credential_id nulo).
+  ---  (Opcional) Selector personal/empresa del registro; enviarlo manda un
+       mail de confirmación real.
