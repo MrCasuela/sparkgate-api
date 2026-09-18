@@ -5,10 +5,14 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 
 from app.main import app
+from app.api import dependencies
 from app.api.dependencies import verify_token
 from app.api.routes import dashboard
 
 NOW = datetime.now(timezone.utc).isoformat()
+
+ORG_ID = "org-1"
+OTHER_ORG_ID = "org-2"
 
 ACTIVE_INTERNAL_CREDENTIAL = {
     "id": "cred-internal-1",
@@ -44,13 +48,28 @@ def client():
 
 @pytest.fixture(autouse=True)
 def override_auth():
+    # Sobrescribe verify_token (no el guard) para que require_enterprise corra
+    # de verdad. El dict viene ya aplanado, como lo devuelve verify_token.
     app.dependency_overrides[verify_token] = lambda: {
         "id": "admin-1",
         "email": "admin@pyme-demo.sparkgate.test",
-        "user_metadata": {"is_admin": True},
+        "type_account": "enterprise",
+        "claimed_org_id": ORG_ID,
+        "user_metadata": {"type_account": "enterprise", "org_id": ORG_ID},
     }
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def stub_organization(monkeypatch):
+    """require_enterprise resuelve la organización contra la tabla en cada
+    request; sin este stub los tests pegarían contra Supabase de verdad."""
+    monkeypatch.setattr(
+        dependencies.org_repo,
+        "get_organization_by_owner",
+        lambda owner_user_id: {"id": ORG_ID, "owner_user_id": owner_user_id, "name": "PYME Demo"},
+    )
 
 
 def credential_lookup_returning(*rows):
@@ -59,17 +78,19 @@ def credential_lookup_returning(*rows):
     against a row whose status changed in between."""
     queue = list(rows)
 
-    def _get(cid):
+    def _get(cid, org_id):
         return queue.pop(0)
 
     return _get
 
 
 @pytest.mark.asyncio
-async def test_members_endpoint_requires_admin(client):
+async def test_members_endpoint_requires_enterprise(client):
     app.dependency_overrides[verify_token] = lambda: {
         "id": "user-1",
         "email": "user@example.com",
+        "type_account": "personal",
+        "claimed_org_id": None,
         "user_metadata": {},
     }
     async with client as ac:
@@ -78,8 +99,69 @@ async def test_members_endpoint_requires_admin(client):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_sin_organizacion_es_rechazado(client, monkeypatch):
+    """type_account dice enterprise pero no hay fila en organizations: el guard
+    se planta, porque la tabla es la fuente de verdad, no el claim."""
+    monkeypatch.setattr(
+        dependencies.org_repo, "get_organization_by_owner", lambda owner_user_id: None
+    )
+    async with client as ac:
+        response = await ac.get("/api/v1/dashboard/members")
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_org_id_sale_de_la_tabla_no_del_claim(client, monkeypatch):
+    """Regresión de R-HU21-3: el claim del token puede estar desactualizado o
+    adulterado, así que el filtro de tenencia tiene que usar el org_id de la
+    tabla, no el que viene en user_metadata."""
+    app.dependency_overrides[verify_token] = lambda: {
+        "id": "admin-1",
+        "email": "admin@pyme-demo.sparkgate.test",
+        "type_account": "enterprise",
+        "claimed_org_id": OTHER_ORG_ID,  # claim mentiroso
+        "user_metadata": {"type_account": "enterprise", "org_id": OTHER_ORG_ID},
+    }
+    received = {}
+
+    def _list(org_id):
+        received["org_id"] = org_id
+        return []
+
+    monkeypatch.setattr(dashboard.dashboard_repo, "list_members_with_credentials", _list)
+
+    async with client as ac:
+        response = await ac.get("/api/v1/dashboard/members")
+
+    assert response.status_code == 200
+    assert received["org_id"] == ORG_ID
+
+
+@pytest.mark.asyncio
+async def test_credencial_de_otra_organizacion_responde_404(client, monkeypatch):
+    """AC3: el repo filtra por org_id, así que una credencial ajena devuelve
+    None y el handler responde 404 — nunca 403, que confirmaría que el id
+    existe."""
+    received = {}
+
+    def _get(cid, org_id):
+        received["org_id"] = org_id
+        return None
+
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", _get)
+
+    async with client as ac:
+        response = await ac.post(
+            "/api/v1/dashboard/credentials/cred-de-otra-org/revoke", json={}
+        )
+
+    assert response.status_code == 404
+    assert received["org_id"] == ORG_ID
+
+
+@pytest.mark.asyncio
 async def test_revoke_rejects_external_credential(client, monkeypatch):
-    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid: ACTIVE_EXTERNAL_CREDENTIAL)
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid, org_id: ACTIVE_EXTERNAL_CREDENTIAL)
     async with client as ac:
         response = await ac.post(
             f"/api/v1/dashboard/credentials/{ACTIVE_EXTERNAL_CREDENTIAL['id']}/revoke",
@@ -90,7 +172,7 @@ async def test_revoke_rejects_external_credential(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_suggest_rejects_internal_credential(client, monkeypatch):
-    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid: ACTIVE_INTERNAL_CREDENTIAL)
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid, org_id: ACTIVE_INTERNAL_CREDENTIAL)
     async with client as ac:
         response = await ac.post(
             f"/api/v1/dashboard/credentials/{ACTIVE_INTERNAL_CREDENTIAL['id']}/suggest",
@@ -102,7 +184,7 @@ async def test_suggest_rejects_internal_credential(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_revoke_rejects_own_admin_account(client, monkeypatch):
     own_credential = dict(ACTIVE_INTERNAL_CREDENTIAL, supabase_user_id="admin-1")
-    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid: own_credential)
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid, org_id: own_credential)
     async with client as ac:
         response = await ac.post(
             f"/api/v1/dashboard/credentials/{own_credential['id']}/revoke",
@@ -113,7 +195,7 @@ async def test_revoke_rejects_own_admin_account(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_revoke_rejects_short_password(client, monkeypatch):
-    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid: dict(ACTIVE_INTERNAL_CREDENTIAL))
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid, org_id: dict(ACTIVE_INTERNAL_CREDENTIAL))
     async with client as ac:
         response = await ac.post(
             f"/api/v1/dashboard/credentials/{ACTIVE_INTERNAL_CREDENTIAL['id']}/revoke",
@@ -162,6 +244,7 @@ async def test_revoke_internal_applies_password_and_bans(client, monkeypatch):
     assert status_calls == [(ACTIVE_INTERNAL_CREDENTIAL["id"], "revocada")]
     assert audit_calls == [
         {
+            "org_id": ORG_ID,
             "actor_email": "admin@pyme-demo.sparkgate.test",
             "member_id": "member-1",
             "credential_id": ACTIVE_INTERNAL_CREDENTIAL["id"],
@@ -217,7 +300,7 @@ async def test_suggest_external_does_not_call_admin_api(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_restore_rejects_already_active(client, monkeypatch):
-    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid: dict(ACTIVE_INTERNAL_CREDENTIAL))
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_credential", lambda cid, org_id: dict(ACTIVE_INTERNAL_CREDENTIAL))
     async with client as ac:
         response = await ac.post(f"/api/v1/dashboard/credentials/{ACTIVE_INTERNAL_CREDENTIAL['id']}/restore")
     assert response.status_code == 400
@@ -296,7 +379,7 @@ async def test_audit_log_endpoint_returns_entries(client, monkeypatch):
         "action": "revocar_interna",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    monkeypatch.setattr(dashboard.dashboard_repo, "list_audit_log", lambda: [entry])
+    monkeypatch.setattr(dashboard.dashboard_repo, "list_audit_log", lambda org_id: [entry])
 
     async with client as ac:
         response = await ac.get("/api/v1/dashboard/audit-log")
@@ -389,7 +472,7 @@ async def test_suggest_external_generates_but_does_not_persist_password(client, 
 @pytest.mark.asyncio
 async def test_revoke_rejects_already_revoked(client, monkeypatch):
     monkeypatch.setattr(
-        dashboard.dashboard_repo, "get_credential", lambda cid: dict(REVOKED_INTERNAL_CREDENTIAL)
+        dashboard.dashboard_repo, "get_credential", lambda cid, org_id: dict(REVOKED_INTERNAL_CREDENTIAL)
     )
     async with client as ac:
         response = await ac.post(
@@ -404,7 +487,7 @@ async def test_suggest_rejects_already_pending(client, monkeypatch):
     monkeypatch.setattr(
         dashboard.dashboard_repo,
         "get_credential",
-        lambda cid: dict(PENDING_EXTERNAL_CREDENTIAL),
+        lambda cid, org_id: dict(PENDING_EXTERNAL_CREDENTIAL),
     )
     async with client as ac:
         response = await ac.post(
