@@ -103,3 +103,46 @@ def test_vault_audit_payload_never_carries_secrets(fake_admin):
     entry = vault_repo.insert_audit(user_id="u1", item_id="i1", action="guardar", result="ok")
     forbidden = {"service_name", "password", "notes", "username", "ciphertext"}
     assert forbidden.isdisjoint(entry.keys())
+
+
+def test_actor_user_id_siempre_esta_en_el_payload(fake_admin):
+    """El key set del payload es fijo: si una entrada omitiera la clave cuando
+    vale None, la reconstrucción de verify_chain (que lee todas las columnas de
+    la fila) dejaría de cuadrar. Es lo que obligó a recrear la tabla en HU21."""
+    entry = vault_repo.insert_audit(user_id="u1", item_id="i1", action="guardar")
+    assert "actor_user_id" in entry
+    assert entry["actor_user_id"] is None
+
+
+def test_cadena_mixta_con_y_sin_actor_verifica(fake_admin):
+    """Entradas del propio dueño (actor None) y de su empresa (actor con id)
+    conviven en la misma cadena global."""
+    vault_repo.insert_audit(user_id="trabajador-1", item_id="i1", action="guardar")
+    vault_repo.insert_audit(
+        user_id="trabajador-1",
+        item_id="i1",
+        action="consultar_admin",
+        actor_user_id="empresa-1",
+    )
+    vault_repo.insert_audit(user_id="trabajador-1", item_id="i1", action="consultar")
+
+    ok, broken_id = audit_chain.verify_chain(vault_repo.VAULT_AUDIT_TABLE)
+    assert ok is True
+    assert broken_id is None
+
+
+def test_alterar_el_actor_rompe_la_cadena(fake_admin):
+    """actor_user_id está cubierto por el hash: falsear quién consultó una
+    credencial ajena es detectable, que es el punto de AC7."""
+    vault_repo.insert_audit(user_id="trabajador-1", item_id="i1", action="guardar")
+    second = vault_repo.insert_audit(
+        user_id="trabajador-1",
+        item_id="i1",
+        action="consultar_admin",
+        actor_user_id="empresa-1",
+    )
+    fake_admin._tables[vault_repo.VAULT_AUDIT_TABLE][1]["actor_user_id"] = "otra-empresa"
+
+    ok, broken_id = audit_chain.verify_chain(vault_repo.VAULT_AUDIT_TABLE)
+    assert ok is False
+    assert broken_id == second["id"]

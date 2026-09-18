@@ -229,3 +229,28 @@ async def test_purge_items_returns_deleted_count(client, monkeypatch):
         "result": "ok",
         "deleted_count": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_fallo_de_integridad_responde_503_y_audita_error(client, monkeypatch):
+    """Si el tag GCM no cuadra (fila movida, adulterada, o KEK rotada) el
+    usuario recibe 503, no un 500 sin traza. No es 404: esconder una
+    adulteración es justo lo que el tag existe para evitar."""
+    from app.services import vault_crypto as vault_crypto_module
+
+    monkeypatch.setattr(vault.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(vault.vault_repo, "get_item", lambda item_id, user_id: dict(STORED_ITEM))
+
+    def _explode(row, aad):
+        raise vault_crypto_module.InvalidTag()
+
+    monkeypatch.setattr(vault.vault_crypto, "decrypt_secret", _explode)
+    audit_calls = _audit_recorder(monkeypatch)
+
+    async with client as ac:
+        response = await ac.get("/api/v1/vault/items/item-1")
+
+    assert response.status_code == 503
+    assert audit_calls == [
+        {"user_id": USER_ID, "item_id": "item-1", "action": "consultar", "result": "error"}
+    ]
