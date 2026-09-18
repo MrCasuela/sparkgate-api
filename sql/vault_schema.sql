@@ -1,8 +1,12 @@
 -- HU17 vault schema (SP-2).
 -- Run once in the Supabase SQL editor of the target project.
--- No RLS: these tables are only ever accessed by the backend via the
--- service_role key (see app/services/db_client.py:get_supabase_admin),
--- gated application-side by the authenticated user's own id (require_user).
+-- RLS activado SIN policies (deny-all, ver el final del archivo). Estas tablas
+-- solo las toca el backend con la clave service_role
+-- (app/services/db_client.py:get_supabase_admin), que ignora RLS, gateadas
+-- application-side por el id del usuario autenticado (require_user) y por el
+-- .eq("user_id", ...) de cada consulta de vault_repo.py. RLS cierra el otro
+-- camino: la clave anon es pública por diseño y sin RLS permitiría leer y
+-- alterar estas tablas -incluida la cadena de auditoría- directo por PostgREST.
 
 create extension if not exists pgcrypto;
 
@@ -47,3 +51,8 @@ create table if not exists vault_audit_log (
 
 create index if not exists vault_items_user_id_idx on vault_items(user_id);
 create index if not exists vault_audit_log_user_id_idx on vault_audit_log(user_id);
+
+-- Deny-all para anon y authenticated (ver el encabezado). Idempotente.
+-- service_role (el backend) ignora RLS y no se ve afectado.
+alter table vault_items enable row level security;
+alter table vault_audit_log enable row level security;

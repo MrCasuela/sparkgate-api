@@ -1,9 +1,14 @@
 -- SP-1 offboarding dashboard schema + organizaciones (HU21 etapa A).
 -- Run once in the Supabase SQL editor of the target project.
--- No RLS: these tables are only ever accessed by the backend via the
--- service_role key (see app/services/db_client.py:get_supabase_admin),
--- gated application-side by require_enterprise, que resuelve la organización
--- del caller contra la tabla organizations (nunca contra el claim del token).
+-- RLS activado SIN policies (deny-all, ver el final del archivo). Estas tablas
+-- solo las toca el backend con la clave service_role
+-- (app/services/db_client.py:get_supabase_admin), que ignora RLS. El aislamiento
+-- entre organizaciones sigue siendo application-side: require_enterprise resuelve
+-- la organización del caller contra la tabla organizations (nunca contra el claim
+-- del token) y cada consulta de dashboard_repo.py filtra por org_id.
+-- RLS cierra el OTRO camino: la clave anon de Supabase es pública por diseño y
+-- PostgREST expone el schema public, así que sin RLS cualquiera con esa clave
+-- lee y ESCRIBE estas tablas directo, saltándose el backend por completo.
 
 create extension if not exists pgcrypto;
 
@@ -63,3 +68,13 @@ create index if not exists dashboard_audit_log_org_id_idx
   on dashboard_audit_log(org_id);
 create index if not exists dashboard_audit_log_created_at_idx
   on dashboard_audit_log(created_at desc);
+
+-- Deny-all para anon y authenticated: RLS sin policies no deja ver ni tocar
+-- ninguna fila. Idempotente. service_role (el backend) ignora RLS y no se ve
+-- afectado. No hay policies por usuario a propósito: ningún cliente se conecta
+-- a estas tablas con un JWT de usuario, así que serían código muerto que sugiere
+-- una protección que el camino real (backend) no usa.
+alter table organizations enable row level security;
+alter table dashboard_members enable row level security;
+alter table dashboard_credentials enable row level security;
+alter table dashboard_audit_log enable row level security;

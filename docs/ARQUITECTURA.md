@@ -187,11 +187,11 @@ La base vive en Supabase (PostgreSQL). Se distinguen dos zonas:
   últimos son **cache de gateo**: la fuente de verdad de la organización es la tabla
   `organizations` (ver §7).
 - **Tablas `organizations` y `dashboard_*`** — creadas por `sql/dashboard_schema.sql`,
-  accesibles solo desde el backend con la clave `service_role` (sin RLS; el gateo es
+  accesibles solo desde el backend con la clave `service_role` (RLS activado sin policies, deny-all para `anon`; el gateo es
   aplicación-side con `require_enterprise`, y el aislamiento entre empresas es un
   `.eq("org_id", ...)` en cada consulta de `dashboard_repo.py`).
 - **Tablas `vault_*`** — creadas por `sql/vault_schema.sql`, mismo modelo de acceso
-  (`service_role`, sin RLS), pero gateado por `require_user` y un `.eq("user_id", ...)`
+  (`service_role`, RLS deny-all), pero gateado por `require_user` y un `.eq("user_id", ...)`
   aplicado en cada consulta de `vault_repo.py`, no por rol.
 
 ```mermaid
@@ -295,8 +295,11 @@ erDiagram
   credencial y acción, no valores.
 - Índices: `dashboard_members(org_id)`, `dashboard_credentials(member_id)`,
   `dashboard_audit_log(org_id)` y `dashboard_audit_log(created_at desc)`.
-- Sin RLS: acceso exclusivo vía `service_role` (cliente `get_supabase_admin()`),
-  nunca expuesto a callers no-admin.
+- RLS activado **sin policies** (deny-all) en las seis tablas: la clave `anon`, pública por
+  diseño, no ve ni escribe nada por PostgREST. El acceso es exclusivo vía `service_role`
+  (cliente `get_supabase_admin()`), que ignora RLS, y ese cliente nunca se expone a callers
+  no-admin. No hay policies por usuario porque ningún cliente se conecta a estas tablas con un
+  JWT de usuario.
 - `vault_items` nunca guarda el secreto en claro: solo el sobre cifrado
   (`ciphertext`/`nonce`/`wrapped_dek`/`dek_nonce`). El AAD del cifrado es el
   `user_id`, así que mover una fila a otro dueño rompe el tag GCM aunque se
@@ -447,7 +450,8 @@ se hace por el panel (ban + rotación de contraseña).
 | Recurso de otra organización → 404 | `dashboard.py` | integrante y credencial ajenos responden igual que los inexistentes, nunca 403 |
 | Toda lectura de bóveda ajena queda doblemente registrada | `dashboard.py` | `vault_audit_log` con `actor_user_id` (lo ve **el trabajador**) + `dashboard_audit_log` (lo ve la empresa) — HU21 AC7 |
 | Vault rechaza sin KEK, sin persistir en claro | `vault.py` | `is_available()` chequeado antes de cualquier escritura (AC5) |
-| Ownership explícito, sin RLS | `vault_repo.py` | `.eq("user_id", ...)` en cada lectura/borrado del vault |
+| Ownership explícito en la aplicación | `vault_repo.py` | `.eq("user_id", ...)` en cada lectura/borrado del vault; RLS no lo reemplaza, porque el backend usa `service_role` |
+| Sin acceso directo con la clave pública | `sql/*.sql` | RLS activado sin policies en las seis tablas: con la clave `anon` no se lee ni se altera nada, incluida la cadena de auditoría |
 | Enumeración de IDs ajenos evitada | `vault.py` | ítem inexistente y ajeno responden ambos 404, nunca 403 |
 | Auditoría del vault sin secretos ni service_name | `vault.py`, `audit_chain.py` | payload seudónimo: solo UUIDs y enums (AC4, HU19) |
 | Cadena de auditoría detecta alteración | `audit_chain.py` | `entry_hash = sha256(prev_hash + payload)`, `verify_chain` recalcula todo |

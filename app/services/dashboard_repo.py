@@ -1,7 +1,8 @@
 """Panel de gobernanza (HU16) con aislamiento por organización (HU21 AC3).
 
 Toda lectura y escritura lleva el org_id del caller. El aislamiento es 100%
-application-side, sin RLS: si una función de este módulo pierde su filtro, una
+application-side (RLS deny-all cierra solo el acceso directo con la clave anon; el
+backend usa service_role, que lo ignora): si una función de este módulo pierde su filtro, una
 empresa ve las credenciales de otra. El org_id llega siempre resuelto desde la
 tabla organizations por require_enterprise, nunca desde un claim del token.
 """
