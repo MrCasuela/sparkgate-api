@@ -30,10 +30,16 @@ create table if not exists vault_audit_log (
   item_id uuid,
   action text not null check (action in (
     'guardar', 'listar', 'consultar', 'consultar_denegado',
-    'eliminar', 'eliminar_denegado', 'eliminar_todo', 'eliminar_cuenta'
+    'eliminar', 'eliminar_denegado', 'eliminar_todo', 'eliminar_cuenta',
+    -- HU21: la empresa consultando la bóveda de un trabajador.
+    'listar_admin', 'consultar_admin', 'consultar_admin_denegado'
   )),
   result text not null default 'ok' check (result in ('ok', 'denegado', 'error')),
   deleted_count int,
+  -- Quién consultó, cuando no fue el dueño (HU21 AC7). El trabajador lo ve en
+  -- su propio GET /api/v1/vault/audit: es la mitigación de privacidad de esa
+  -- historia. Sigue siendo seudónimo (un UUID), acorde al criterio del payload.
+  actor_user_id uuid,
   prev_hash text not null unique,
   entry_hash text not null,
   created_at timestamptz not null default now()
