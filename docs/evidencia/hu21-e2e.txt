@@ -53,3 +53,71 @@ Backend reiniciado con VAULT_MASTER_KEY restaurada -> health 200, is_available()
 
 23/23 pasos OK (22 automatizados + AC8 verificado en vivo).
 Pendiente manual: AC4/AC2/AC6 en la UI de la extensión (docs/evidencia/hu21-ui-manual.txt).
+
+============================================================================
+NOTA DE TRAZABILIDAD — 2026-09-18 (la corrida de arriba se conserva intacta)
+============================================================================
+El conteo "22/22" y "23/23" de arriba está inflado. En modo fallback (registro
+público rechazado por Supabase, cuenta provisionada por Admin API) los tres
+checks del paso 1 no verifican la aplicación:
+  - 1a comprobaba que create_user de la Admin API devolvió un id.
+  - 1b era un valor fijo (True): pasaba siempre.
+  - 1c comprobaba una fila de `organizations` que el propio script acababa de
+    insertar.
+Descontados, la corrida original tiene 19 verificaciones automatizadas
+sustantivas, más AC8 verificado a mano en vivo (listado 200 / reveal 503).
+
+Lo que queda SIN ejercitar contra el sistema real: que type_account viaje dentro
+del token del sign_up (hallazgo G11 de HU21_PLAN.md §8). Solo está probado con
+mocks (tests/test_org_accounts.py). La causa observada hoy no fue solo el rate
+limit: Supabase rechaza @example.com como dirección inválida. Para ejercitarlo
+hace falta una dirección con dominio entregable.
+
+El script se corrigió: los pasos no ejercitados se imprimen como SKIP y no
+cuentan como PASS. Corrida de verificación del script corregido, contra el
+backend y Supabase reales (con E2E_HU21_CLEANUP=1):
+
+HU21 E2E — 2026-09-18T21:35:53.346295+00:00
+Base URL: http://localhost:8000
+
+  AVISO: el endpoint público de registro falló (400 'Email address "sparkgate.e2e.hu21.e1.ca853f69@example.com" is invalid') — típicamente el rate limit de confirmación de Supabase en tier free (ya documentado en HU17). El camino type_account-en-sign_up ya está cubierto por mocks en test_org_accounts.py; acá se sigue por Admin API.
+SKIP  1. Registro de cuenta empresa por el endpoint público: NO ejercitado (cuenta provisionada por Admin API); type_account-en-el-token-del-sign_up queda verificado solo con mocks
+PASS  2a. POST /dashboard/members -> 201 (fue 201)
+PASS  2b. Devuelve una contraseña temporal
+PASS  2c. El integrante quedó con org_id y supabase_user_id
+PASS  3. Login del trabajador con la contraseña temporal -> 200 (fue 200)
+PASS  4. El trabajador guarda 2 credenciales en su bóveda
+PASS  5a. GET /members/{id}/vault -> 200 con 2 ítems (fue 200)
+PASS  5b. El listado no trae secretos ni criptograma
+PASS  6a. POST .../reveal -> 200 (fue 200)
+PASS  6b. El plaintext coincide con lo que guardó el trabajador
+PASS  7a. El trabajador ve la entrada consultar_admin en su propia auditoría
+PASS  7b. Esa entrada identifica a la empresa como actor (si falla, la mitigación de AC7 NO está cumplida)
+PASS  8a. El panel registra consultar_vault_miembro
+PASS  8b. Esa entrada lleva vault_item_id y credential_id en null
+PASS  9. verify_chain('vault_audit_log') con entradas mixtas (broken_id=None)
+PASS  10a. La segunda empresa no ve al trabajador de la primera
+PASS  10b. Listar la bóveda de un integrante ajeno -> 404 (fue 404)
+PASS  10c. Revelar un ítem ajeno -> 404 (fue 404)
+PASS  11. Cuenta personal en /dashboard/members -> 403 (fue 403)
+PASS  12. Integrante sin cuenta SparkGate -> 200 con lista vacía (fue 200)
+
+13. MANUAL — no automatizado (requiere reiniciar el backend sin
+    VAULT_MASTER_KEY, y este script no reinicia procesos que no le pertenecen):
+    a) Comentar VAULT_MASTER_KEY en .env, reiniciar el backend.
+    b) GET  /api/v1/dashboard/members/df9182db-f52e-409f-8729-e2739d415a68/vault -> esperar 200 con los ítems
+       (listar metadata no descifra, así que no depende de la KEK — AC8).
+    c) POST /api/v1/dashboard/members/df9182db-f52e-409f-8729-e2739d415a68/vault/6f3426f7-f750-4095-8bea-844154185dcf/reveal -> esperar 503.
+    d) Descomentar VAULT_MASTER_KEY y reiniciar antes de seguir usándolo.
+
+14. MANUAL — UI de la extensión (evidencia en docs/evidencia/hu21-ui-manual.txt):
+    a) AC4: login con la cuenta empresa -> el botón 'Panel de administración'
+       aparece; login con una cuenta personal -> no aparece.
+    b) AC2: 'Agregar trabajador' muestra la contraseña temporal una sola vez.
+    c) AC6: 'Ver contraseña' sobre un ítem del trabajador abre el modal con el
+       aviso de que la consulta queda registrada en la auditoría que él ve.
+
+Limpieza (E2E_HU21_CLEANUP=1)...
+Limpieza terminada.
+
+19/19 pasos OK, 1 omitidos (no cuentan como PASS).

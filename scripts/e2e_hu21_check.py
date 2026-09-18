@@ -55,10 +55,21 @@ _created_user_ids: list[str] = []
 _created_org_ids: list[str] = []
 
 
+_skipped: list[str] = []
+
+
 def check(label: str, condition: bool) -> bool:
     _results.append((condition, label))
     print(("PASS" if condition else "FAIL") + f"  {label}")
     return condition
+
+
+def skip(label: str) -> None:
+    """Un paso que NO se ejercitó. No suma a los PASS: un check con resultado
+    fijo o que comprueba lo que el propio script acaba de crear infla el conteo
+    sin probar nada de la aplicación."""
+    _skipped.append(label)
+    print(f"SKIP  {label}")
 
 
 def auth_headers(token: str) -> dict:
@@ -217,16 +228,24 @@ def main() -> None:
         detail = e.response.json().get("detail", "") if e.response.content else ""
         print(
             f"  AVISO: el endpoint público de registro falló ({e.response.status_code} "
-            f"{detail!r}) — típicamente el rate limit de confirmación de Supabase en "
-            "tier free (ya documentado en HU17). El camino type_account-en-sign_up ya "
-            "está cubierto por mocks en test_org_accounts.py; acá se sigue por Admin API."
+            f"{detail!r}). Dos causas observadas en este proyecto: Supabase rechaza el "
+            "dominio de prueba @example.com como dirección inválida, y el rate limit de "
+            "confirmación de mails del tier free (visto en HU17). Para ejercitar este "
+            "camino de verdad hace falta una dirección con dominio entregable y cuota "
+            "disponible. Acá se sigue por Admin API."
         )
         e1_user_id, org_id_e1, token_e1 = provision_enterprise_via_admin(
             admin, client, email_e1, password, f"PYME E2E {suffix}"
         )
-        check("1a. Registro de cuenta empresa (fallback Admin API) -> ok", bool(e1_user_id))
-        check("1b. type_account=enterprise (fallback, no ejercitado vía endpoint público)", True)
-        check("1c. La fila en organizations existe", bool(org_id_e1))
+        # La cuenta la creó este script, no la aplicación: comprobar que existe, o
+        # que declara enterprise, sería verificar el propio setup. Lo que queda sin
+        # ejercitar contra el sistema real es que type_account viaje dentro del
+        # token del sign_up (cubierto solo por mocks en test_org_accounts.py).
+        skip(
+            "1. Registro de cuenta empresa por el endpoint público: NO ejercitado "
+            "(cuenta provisionada por Admin API); type_account-en-el-token-del-sign_up "
+            "queda verificado solo con mocks"
+        )
 
     # 2. Alta de trabajador
     resp = client.post(
@@ -405,7 +424,7 @@ def main() -> None:
 
     total = len(_results)
     passed = sum(1 for ok, _ in _results if ok)
-    print(f"\n{passed}/{total} pasos OK.")
+    print(f"\n{passed}/{total} pasos OK, {len(_skipped)} omitidos (no cuentan como PASS).")
     if passed != total:
         sys.exit(1)
 
