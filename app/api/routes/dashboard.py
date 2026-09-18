@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.dependencies import require_enterprise
+from app.core.exceptions import ServiceUnavailableError
 from app.schemas.dashboard import (
     AuditLogEntryOut,
     CreateMemberRequest,
@@ -11,7 +12,8 @@ from app.schemas.dashboard import (
     CredentialActionResponse,
     MemberOut,
 )
-from app.services import dashboard_repo, random_generator
+from app.schemas.vault import VaultItemOut, VaultSecretOut
+from app.services import dashboard_repo, random_generator, vault_crypto, vault_repo
 from app.services.db_client import get_supabase_admin
 
 logger = logging.getLogger("sparkgate.dashboard")
@@ -258,3 +260,168 @@ async def restore_credential(
 
     updated = dashboard_repo.get_credential(credential_id, caller["org_id"])
     return CredentialActionResponse(credential=updated, admin_api_success=admin_api_success)
+
+
+def _resolve_member_owner(member_id: str, org_id: str) -> str | None:
+    """Valida que el integrante sea de MI organización y devuelve el user_id de
+    su cuenta SparkGate (None si no tiene ninguna vinculada).
+
+    Un integrante de otra organización responde 404 y no 403: mismo criterio
+    anti-enumeración que el vault personal, inexistente y ajeno se ven igual.
+    """
+    member = dashboard_repo.get_member(member_id, org_id)
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Integrante no encontrado"
+        )
+    return member.get("supabase_user_id")
+
+
+@router.get("/members/{member_id}/vault", response_model=list[VaultItemOut])
+async def list_member_vault(
+    member_id: str,
+    caller: dict = Depends(require_enterprise),
+):
+    """Metadata de la bóveda de un trabajador (HU21 AC5).
+
+    No llama a _require_available() a propósito: listar metadata no descifra
+    nada, así que sigue funcionando con la clave maestra caída (AC8). Es el
+    mismo criterio que GET /api/v1/vault/items.
+    """
+    org_id = caller["org_id"]
+    owner_id = _resolve_member_owner(member_id, org_id)
+
+    if owner_id is None:
+        # Integrante sin cuenta SparkGate vinculada (contratista externo, o
+        # alguien que ya borró su cuenta): no tiene bóveda que listar.
+        return []
+
+    items = vault_repo.list_items(owner_id)
+    vault_repo.insert_audit(
+        user_id=owner_id,
+        item_id=None,
+        action="listar_admin",
+        result="ok",
+        actor_user_id=caller["id"],
+    )
+    dashboard_repo.insert_audit_log(
+        org_id=org_id,
+        actor_email=caller.get("email", "unknown"),
+        member_id=member_id,
+        action="listar_vault_miembro",
+    )
+    logger.info(
+        "Bóveda del integrante %s listada por %s (%s ítems)", member_id, caller["id"], len(items)
+    )
+    return items
+
+
+@router.post(
+    "/members/{member_id}/vault/{item_id}/reveal",
+    response_model=VaultSecretOut,
+)
+async def reveal_member_vault_item(
+    member_id: str,
+    item_id: str,
+    caller: dict = Depends(require_enterprise),
+):
+    """Descifra una credencial del trabajador y la devuelve (HU21 AC6).
+
+    Es POST y no GET a propósito: escribe auditoría, no debe quedar en el
+    historial del navegador ni ser precargable.
+    """
+    if not vault_crypto.is_available():
+        raise ServiceUnavailableError(
+            "Vault",
+            detail="El módulo de bóveda no está operativo: falta la clave maestra.",
+        )
+
+    org_id = caller["org_id"]
+    actor_id = caller["id"]
+    actor_email = caller.get("email", "unknown")
+    owner_id = _resolve_member_owner(member_id, org_id)
+
+    if owner_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada"
+        )
+
+    item = vault_repo.get_item(item_id, owner_id)
+    if item is None:
+        vault_repo.insert_audit(
+            user_id=owner_id,
+            item_id=item_id,
+            action="consultar_admin_denegado",
+            result="denegado",
+            actor_user_id=actor_id,
+        )
+        dashboard_repo.insert_audit_log(
+            org_id=org_id,
+            actor_email=actor_email,
+            member_id=member_id,
+            action="consultar_vault_miembro_denegado",
+            vault_item_id=item_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada"
+        )
+
+    # El AAD sigue siendo el user_id del DUEÑO, no el del caller: identifica de
+    # quién es el dato, no quién pregunta. Por eso el acceso de la empresa no
+    # obliga a tocar vault_crypto ni debilita el cifrado — mover una fila a otro
+    # user_id sigue rompiendo el tag GCM.
+    try:
+        secret = vault_crypto.decrypt_secret(item, aad=owner_id)
+    except vault_crypto.InvalidTag:
+        vault_repo.insert_audit(
+            user_id=owner_id,
+            item_id=item_id,
+            action="consultar_admin",
+            result="error",
+            actor_user_id=actor_id,
+        )
+        dashboard_repo.insert_audit_log(
+            org_id=org_id,
+            actor_email=actor_email,
+            member_id=member_id,
+            action="consultar_vault_miembro",
+            vault_item_id=item_id,
+        )
+        logger.error(
+            "Reveal del ítem %s: fallo de integridad al descifrar (kek_version=%s)",
+            item_id,
+            item.get("kek_version"),
+        )
+        raise ServiceUnavailableError(
+            "Vault",
+            detail="No se pudo descifrar la credencial: el registro no supera "
+            "la verificación de integridad.",
+        )
+
+    # Doble auditoría (AC7). La entrada del vault es la que ve el propio
+    # trabajador en GET /api/v1/vault/audit: es la mitigación de privacidad de
+    # esta historia, no un detalle de implementación.
+    vault_repo.insert_audit(
+        user_id=owner_id,
+        item_id=item_id,
+        action="consultar_admin",
+        result="ok",
+        actor_user_id=actor_id,
+    )
+    dashboard_repo.insert_audit_log(
+        org_id=org_id,
+        actor_email=actor_email,
+        member_id=member_id,
+        action="consultar_vault_miembro",
+        vault_item_id=item_id,
+    )
+    logger.info(
+        "Ítem %s del integrante %s revelado a %s", item_id, member_id, actor_id
+    )
+    return VaultSecretOut(
+        id=item["id"],
+        service_name=item["service_name"],
+        username=item.get("username"),
+        password=secret["password"],
+        notes=secret.get("notes"),
+    )

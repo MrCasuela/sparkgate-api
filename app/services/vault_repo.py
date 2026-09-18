@@ -72,15 +72,22 @@ def insert_audit(
     action: str,
     result: str = "ok",
     deleted_count: int | None = None,
+    actor_user_id: str | None = None,
 ) -> dict:
     # Fixed key set on every entry (even when a value is None) so verify_chain's
     # row-to-payload reconstruction always matches what was hashed at insert time.
+    #
+    # actor_user_id: None cuando el dueño actúa sobre su propia bóveda; el id de
+    # quien consultó cuando la empresa abre la bóveda de un trabajador (HU21
+    # AC7). Va siempre en el payload, incluso en None, o la cadena deja de
+    # verificar.
     payload = {
         "user_id": user_id,
         "item_id": item_id,
         "action": action,
         "result": result,
         "deleted_count": deleted_count,
+        "actor_user_id": actor_user_id,
     }
     return audit_chain.append_entry(VAULT_AUDIT_TABLE, payload)
 
