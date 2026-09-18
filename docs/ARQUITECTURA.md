@@ -47,7 +47,7 @@ excepciones) y `schemas/` son transversales y no dependen de capas superiores.
 ```mermaid
 flowchart TB
     subgraph coord[api/  — coordinación + guardas de auth]
-        DEP[api/dependencies.py<br/>verify_token / require_premium / require_admin]
+        DEP[api/dependencies.py<br/>verify_token / require_premium / require_enterprise]
         ROUTES[api/routes/*  — auth, passwords, dashboard, health]
     end
 
@@ -146,7 +146,7 @@ flowchart TB
 | Módulo | Archivo | Responsabilidad |
 |--------|---------|-----------------|
 | `main` | `app/main.py` | Instancia FastAPI, CORS, routers, handlers de excepción |
-| Dependencias | `app/api/dependencies.py` | `verify_token` (JWT→dict o `None`), `require_premium`, `require_admin` |
+| Dependencias | `app/api/dependencies.py` | `verify_token` (JWT→dict o `None`), `require_premium`, `require_enterprise` |
 | Auth | `app/api/routes/auth.py` | Proxy a Supabase Auth: register / login / logout |
 | Passwords | `app/api/routes/passwords.py` | Evaluar (3 dimensiones) y generar (AI/random) |
 | Dashboard | `app/api/routes/dashboard.py` | Offboarding SP-1: members, audit-log, revoke/suggest/restore |
@@ -183,17 +183,23 @@ La base vive en Supabase (PostgreSQL). Se distinguen dos zonas:
 - **`auth.users`** — gestionada por Supabase Auth. SparkGate no la lee ni escribe
   directo: la manipula vía API (`sign_up`, `sign_in_with_password`,
   `auth.admin.update_user_by_id`, `auth.admin.sign_out`). Los flags de negocio se
-  guardan en `raw_user_meta_data` → `premium` e `is_admin`.
-- **Tablas `dashboard_*`** — creadas por `sql/dashboard_schema.sql`, accesibles solo
-  desde el backend con la clave `service_role` (sin RLS; el gateo de admin es
-  aplicación-side con `require_admin`).
+  guardan en `raw_user_meta_data` → `premium`, `type_account` y `org_id`. Los dos
+  últimos son **cache de gateo**: la fuente de verdad de la organización es la tabla
+  `organizations` (ver §7).
+- **Tablas `organizations` y `dashboard_*`** — creadas por `sql/dashboard_schema.sql`,
+  accesibles solo desde el backend con la clave `service_role` (sin RLS; el gateo es
+  aplicación-side con `require_enterprise`, y el aislamiento entre empresas es un
+  `.eq("org_id", ...)` en cada consulta de `dashboard_repo.py`).
 - **Tablas `vault_*`** — creadas por `sql/vault_schema.sql`, mismo modelo de acceso
   (`service_role`, sin RLS), pero gateado por `require_user` y un `.eq("user_id", ...)`
   aplicado en cada consulta de `vault_repo.py`, no por rol.
 
 ```mermaid
 erDiagram
+    auth_users ||..o| organizations : "owner_user_id (lógica, sin FK)"
+    organizations ||--o{ dashboard_members : "org_id FK"
     auth_users ||..o| dashboard_credentials : "supabase_user_id (lógica, sin FK)"
+    auth_users ||..o| dashboard_members : "supabase_user_id (lógica, sin FK)"
     dashboard_members ||--o{ dashboard_credentials : "member_id FK, on delete cascade"
     dashboard_members ||..o{ dashboard_audit_log : "member_id (lógica, sin FK)"
     dashboard_credentials ||..o{ dashboard_audit_log : "credential_id (lógica, sin FK)"
@@ -201,15 +207,24 @@ erDiagram
     auth_users {
         uuid id PK "Supabase Auth"
         text email
-        jsonb raw_user_meta_data "premium, is_admin"
+        jsonb raw_user_meta_data "premium, type_account, org_id"
         text encrypted_password
+    }
+
+    organizations {
+        uuid id PK "gen_random_uuid()"
+        uuid owner_user_id UK "la cuenta empresa dueña"
+        text name "not null"
+        timestamptz created_at "default now()"
     }
 
     dashboard_members {
         uuid id PK "gen_random_uuid()"
+        uuid org_id FK "not null, aislamiento"
         text full_name "not null"
         text email "not null"
         text role_title "nullable"
+        uuid supabase_user_id "puente con su cuenta SparkGate, nullable"
         timestamptz created_at "default now()"
     }
 
@@ -225,10 +240,12 @@ erDiagram
 
     dashboard_audit_log {
         uuid id PK "gen_random_uuid()"
-        text actor_email "admin que ejecuta"
+        uuid org_id "not null, aislamiento"
+        text actor_email "quien ejecuta"
         uuid member_id
-        uuid credential_id
-        text credential_type
+        uuid credential_id "nullable: los eventos de bóveda no tienen"
+        text credential_type "nullable"
+        uuid vault_item_id "solo eventos de bóveda"
         text action
         timestamptz created_at "default now()"
     }
@@ -255,9 +272,10 @@ erDiagram
         uuid id PK "gen_random_uuid()"
         uuid user_id "seudónimo tras borrar la cuenta"
         uuid item_id "nullable"
-        text action "guardar|listar|consultar|consultar_denegado|eliminar|eliminar_denegado|eliminar_todo|eliminar_cuenta"
+        text action "guardar|listar|consultar|consultar_denegado|eliminar|eliminar_denegado|eliminar_todo|eliminar_cuenta|listar_admin|consultar_admin|consultar_admin_denegado"
         text result "ok|denegado|error"
         int deleted_count "solo eliminar_todo/eliminar_cuenta"
+        uuid actor_user_id "null = el dueño; si no, quién consultó (HU21)"
         text prev_hash UK "hash de la entrada anterior"
         text entry_hash "sha256(prev_hash + payload)"
         timestamptz created_at "default now()"
@@ -268,11 +286,15 @@ erDiagram
 
 - Las credenciales *internas* referencian a `auth.users` mediante `supabase_user_id`.
   No hay FK real porque `auth.users` pertenece al esquema `auth` de Supabase.
-- La correspondencia miembro ↔ usuario auth es **por email** (así la establece
-  `scripts/seed_dashboard_demo.py`). No existe FK `dashboard_members.user_id`.
+- Desde HU21 la correspondencia miembro ↔ usuario auth es explícita:
+  `dashboard_members.supabase_user_id`. Es el puente que la empresa usa para abrir
+  la bóveda del trabajador, y lo único que se anula (sin borrar la fila) cuando el
+  integrante ejerce su derecho de supresión. Sigue sin haber FK real a `auth.users`,
+  que pertenece a otro esquema.
 - `dashboard_audit_log` **nunca** almacena contraseñas (AC4): guarda actor, miembro,
   credencial y acción, no valores.
-- Índices: `dashboard_credentials(member_id)` y `dashboard_audit_log(created_at desc)`.
+- Índices: `dashboard_members(org_id)`, `dashboard_credentials(member_id)`,
+  `dashboard_audit_log(org_id)` y `dashboard_audit_log(created_at desc)`.
 - Sin RLS: acceso exclusivo vía `service_role` (cliente `get_supabase_admin()`),
   nunca expuesto a callers no-admin.
 - `vault_items` nunca guarda el secreto en claro: solo el sobre cifrado
@@ -359,7 +381,7 @@ sequenceDiagram
     participant AU as Supabase Admin API
 
     Admin->>R: POST /dashboard/credentials/{id}/revoke
-    Note over R: require_admin → is_admin en metadata
+    Note over R: require_enterprise → type_account (claim) + organizations (tabla)
     R->>DB: get_credential(id)
     Note over R: guardas: existe / tipo interna / no es tu propia cuenta / no ya revocada
     R->>R: _resolve_password → random 16 o override new_password
@@ -418,7 +440,12 @@ se hace por el panel (ban + rotación de contraseña).
 | Sin contraseñas en el audit log | `dashboard.py`, `dashboard_repo.py` | AC4 — solo actor/acción |
 | CORS por orígenes exactos + regex | `main.py` | wildcards traducidos a regex |
 | Envelope encryption (DEK/KEK) | `vault_crypto.py` | AES-256-GCM, KEK en `.env`, nunca en DB ni logs (HU17 AC2) |
-| Ciphertext ligado al dueño | `vault_crypto.py` | AAD=`user_id`; `InvalidTag` si se descifra bajo otro dueño (AC3) |
+| Ciphertext ligado al dueño | `vault_crypto.py` | AAD=`user_id` del **dueño** (no del caller); `InvalidTag` si se descifra bajo otro dueño |
+| Fallo de integridad visible, no silencioso | `vault.py`, `dashboard.py` | `InvalidTag` → 503 + auditoría `result="error"`; nunca 404 (escondería la adulteración) ni 500 |
+| Aislamiento entre organizaciones | `dashboard_repo.py`, `dependencies.py` | `.eq("org_id", ...)` en cada consulta; el `org_id` lo resuelve `require_enterprise` contra la tabla `organizations`, nunca desde el claim del token (HU21 AC3) |
+| El claim de tenencia solo puede negar | `dependencies.py` | `user_metadata.org_id` se aplana como `claimed_org_id`; la clave `org_id` que leen los handlers la escribe únicamente el guard tras consultar la tabla |
+| Recurso de otra organización → 404 | `dashboard.py` | integrante y credencial ajenos responden igual que los inexistentes, nunca 403 |
+| Toda lectura de bóveda ajena queda doblemente registrada | `dashboard.py` | `vault_audit_log` con `actor_user_id` (lo ve **el trabajador**) + `dashboard_audit_log` (lo ve la empresa) — HU21 AC7 |
 | Vault rechaza sin KEK, sin persistir en claro | `vault.py` | `is_available()` chequeado antes de cualquier escritura (AC5) |
 | Ownership explícito, sin RLS | `vault_repo.py` | `.eq("user_id", ...)` en cada lectura/borrado del vault |
 | Enumeración de IDs ajenos evitada | `vault.py` | ítem inexistente y ajeno responden ambos 404, nunca 403 |
@@ -475,16 +502,19 @@ flowchart LR
 | Método | Ruta | Guarda | Capa servicio | Notas |
 |--------|------|--------|---------------|-------|
 | GET | `/api/v1/health` | — | `db_client.check_connection` + GET Ollama raíz | estado `ok`/`degraded` |
-| POST | `/api/v1/auth/register` | — | Supabase `sign_up` | metadata `premium=false` |
+| POST | `/api/v1/auth/register` | — | Supabase `sign_up` + `org_repo` | `type_account` viaja en el `sign_up`; si es `enterprise`, crea la organización |
 | POST | `/api/v1/auth/login` | — | Supabase `sign_in_with_password` | devuelve `access_token` |
 | POST | `/api/v1/auth/logout` | Bearer propio | `admin.sign_out(scope=global)` | solo propia sesión |
 | POST | `/api/v1/passwords/evaluate` | auth | `entropy` + `hibp_client` + `ai_engine` (con caché `cache.py`, TTL 1h) | 3 dimensiones |
 | POST | `/api/v1/passwords/generate` | auth | `random_generator` / `ai_engine` | `mode: ai\|random` |
-| GET | `/api/v1/dashboard/members` | admin | `dashboard_repo` | miembros + credenciales |
-| GET | `/api/v1/dashboard/audit-log` | admin | `dashboard_repo` | `created_at desc` |
-| POST | `/api/v1/dashboard/credentials/{id}/revoke` | admin | `dashboard_repo` + Admin API | interna |
-| POST | `/api/v1/dashboard/credentials/{id}/suggest` | admin | `dashboard_repo` | externa |
-| POST | `/api/v1/dashboard/credentials/{id}/restore` | admin | `dashboard_repo` + Admin API | interna/externa |
+| GET | `/api/v1/dashboard/members` | empresa | `dashboard_repo` | miembros + credenciales de **su** organización |
+| POST | `/api/v1/dashboard/members` | empresa | `dashboard_repo` + Admin API | alta de trabajador; devuelve la contraseña temporal una sola vez (HU21 AC2) |
+| GET | `/api/v1/dashboard/audit-log` | empresa | `dashboard_repo` | `created_at desc`, filtrado por `org_id` |
+| POST | `/api/v1/dashboard/credentials/{id}/revoke` | empresa | `dashboard_repo` + Admin API | interna |
+| POST | `/api/v1/dashboard/credentials/{id}/suggest` | empresa | `dashboard_repo` | externa |
+| POST | `/api/v1/dashboard/credentials/{id}/restore` | empresa | `dashboard_repo` + Admin API | interna/externa |
+| GET | `/api/v1/dashboard/members/{id}/vault` | empresa | `dashboard_repo` + `vault_repo` | metadata del trabajador, no descifra; sin cuenta vinculada → `[]` (HU21 AC5) |
+| POST | `/api/v1/dashboard/members/{id}/vault/{item}/reveal` | empresa | `vault_repo` + `vault_crypto` | descifra con el AAD del **dueño**; doble auditoría (HU21 AC6/AC7) |
 | POST | `/api/v1/vault/items` | usuario | `vault_crypto` + `vault_repo` | 503 si falta la KEK (AC5) |
 | GET | `/api/v1/vault/items` | usuario | `vault_repo` | metadatos, nunca descifra |
 | GET | `/api/v1/vault/items/{id}` | usuario | `vault_repo` + `vault_crypto` | 404 si no es del dueño (AC3) |
@@ -499,7 +529,7 @@ flowchart LR
 app/
 ├── main.py                 # Ensamblado FastAPI: CORS, routers, exception handlers
 ├── api/
-│   ├── dependencies.py     # verify_token / require_user / require_premium / require_admin
+│   ├── dependencies.py     # verify_token / require_user / require_premium / require_enterprise
 │   └── routes/             # Coordinadores (auth, passwords, dashboard, vault, health)
 ├── core/                   # config.py (Settings) + exceptions.py (handlers 502/503)
 ├── schemas/                # Pydantic: auth, common, passwords, dashboard, vault

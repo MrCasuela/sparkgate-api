@@ -1,6 +1,8 @@
 # HU21 — Cuentas personal vs. empresa + acceso de la empresa a la bóveda del trabajador
 
-> **Estado**: planificada, **no implementada**. Diseño acordado el 2026-09-16.
+> **Estado**: **implementada** el 2026-09-17. Diseño original acordado el 2026-09-16.
+> El texto de abajo se conserva tal como se escribió; las correcciones que exigió
+> el código real están anexadas al final (§8), no fundidas en el original.
 > Depende de HU17 (bóveda personal), que sí está implementada.
 > Numeración: HU21 porque HU18 ya existe en el backlog (consulta/rotación admin con segundo factor).
 
@@ -296,3 +298,34 @@ marcar los ítems como laborales o personales y exponer solo los primeros.
 claim se desincronizan, el gateo del guard puede quedar desactualizado hasta que el usuario
 renueve el token. La fuente de verdad es la tabla; cualquier operación sensible debe
 resolver contra ella, no contra el claim.
+
+
+---
+
+## 8. Correcciones al diseño del 2026-09-16 (anexo del 2026-09-17)
+
+El plan original se conserva arriba sin retoques: los deltas son la evidencia de
+la revisión, y borrarlos haría parecer que el diseño salió bien a la primera.
+
+| # | Lo que decía el plan | Lo que dijo el código | Resolución |
+|---|---|---|---|
+| G1 | `require_enterprise` con fallback legacy a `is_admin: True` | Un usuario `is_admin` no tiene `org_id` en ningún lado | El fallback era auto-destructivo: habría devuelto un caller sin `org_id`, o sea consultas sin filtrar — justo la violación de R9 que la historia viene a cerrar. **Derogado**: el guard es estricto y `require_admin` se elimina |
+| G2 | "`vault_schema.sql` conviene editarlo **antes de aplicarlo**, así no hace falta migración" | La tabla estaba aplicada y con filas (`docs/evidencia/hu17-e2e.txt`, 14/14 el 2026-09-16) | Se **recrean** las tablas con `scripts/reset_hu21_schema.py`, aceptando la pérdida de datos porque el entorno es de desarrollo. Los `.sql` quedan como única fuente de verdad |
+| G3 | "`get_credential(credential_id, org_id)` valida que la credencial pertenezca a esa org" | `dashboard_credentials` no tiene `org_id` y el plan no decía el mecanismo | Embed `!inner` de PostgREST sobre la FK `member_id`, que ya existía: una ida y vuelta, y el filtro lo aplica Postgres |
+| G4 | `credential_id`/`credential_type` pasan a nullable **en SQL** | `AuditLogEntryOut` los tenía requeridos | Sin tocar el schema Pydantic, la primera fila de auditoría de bóveda habría reventado la validación de respuesta de `GET /audit-log` con un 500 |
+| G5 | "Todas las funciones reciben `org_id`" | `credential_lookup_returning` aceptaba `(cid)`, más 7 lambdas y 2 igualdades exactas de dict | 14 de los 18 tests de `test_dashboard.py` se caían. Adaptación mecánica, manteniendo las igualdades exactas (no relajadas a subset: son las que hacen hermética la garantía de que ningún payload lleva la contraseña) |
+| G6 | — | `decrypt_secret` puede lanzar `InvalidTag` y **ninguna ruta lo capturaba** | Bug preexistente que el reveal agrava. Se arregló primero, en su propio commit: 503 + auditoría `result="error"` (primer uso real de ese valor del enum), también en el camino personal |
+| G7 | "Devuelve el user con `org_id` garantizado" | No decía de dónde salía | Si salía del claim, R-HU21-3 dejaba de ser "cache desactualizado" y pasaba a ser bypass de tenencia. Se aplana como `claimed_org_id` y la clave `org_id` la escribe solo el guard tras consultar la tabla: un claim adulterado únicamente puede negar |
+| G8 | — | `VaultAuditEntryOut` no exponía `actor_user_id` y `list_audit` hace `select("*")` | Pydantic descartaba la columna en silencio. **AC7 no se cumplía** con solo agregarla a la base: el trabajador seguía sin ver quién abrió sus credenciales, que es toda la mitigación |
+| G9 | — | `detach_supabase_user` limpiaba solo `dashboard_credentials` | Tras un borrado de cuenta, `dashboard_members.supabase_user_id` quedaba apuntando a un usuario muerto y el endpoint de bóveda lo usaba como AAD. Ahora corta los dos vínculos |
+| G10 | — | `append_entry` lee la cola de toda la tabla y `prev_hash` es `UNIQUE` | La etapa B agrega un segundo escritor a una cadena global: dos escrituras concurrentes hacen fallar la segunda sin captura. **No se resolvió**: queda como R-HU21-4 |
+| G11 | — | `register` devuelve el `access_token` del `sign_up`, minteado antes de cualquier Admin API | Con `type_account` seteado post-hoc, la empresa se registraba y **no veía el botón** hasta re-loguearse. Ahora viaja en `options.data` del `sign_up` |
+| G12 | — | `app/core/exceptions.py` tiene solo tres clases | Todo 403/404/400 nuevo va con `HTTPException` pelado, sin inventar clases |
+
+**R-HU21-4 (nuevo riesgo aceptado).** `vault_audit_log.prev_hash` es `unique` y
+`append_entry` lee la última entrada de toda la tabla, sin filtrar por usuario. Con
+la empresa como segundo escritor, un `reveal` concurrente con un `guardar` del
+trabajador hace fallar el segundo insert por violación de unicidad, sin captura →
+500. La carrera ya existía entre usuarios; esta historia la hace bastante más
+probable. Mitigación pendiente: reintentar releyendo la cola (~10 líneas en
+`append_entry`).
