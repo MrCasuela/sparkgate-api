@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.dependencies import require_enterprise
 from app.schemas.dashboard import (
     AuditLogEntryOut,
+    CreateMemberRequest,
+    CreateMemberResponse,
     CredentialActionRequest,
     CredentialActionResponse,
     MemberOut,
@@ -32,6 +34,85 @@ def _resolve_password(body: CredentialActionRequest) -> str:
 @router.get("/members", response_model=list[MemberOut])
 async def list_members(caller: dict = Depends(require_enterprise)):
     return dashboard_repo.list_members_with_credentials(caller["org_id"])
+
+
+@router.post("/members", response_model=CreateMemberResponse, status_code=status.HTTP_201_CREATED)
+async def create_member(
+    body: CreateMemberRequest,
+    caller: dict = Depends(require_enterprise),
+):
+    """Provisiona la cuenta de un trabajador (HU21 AC2).
+
+    Usa la Admin API y no el sign_up público: no manda mail de confirmación, así
+    que no choca con el rate limit de Supabase, y la cuenta queda vinculada a la
+    organización en el acto.
+    """
+    org_id = caller["org_id"]
+    temporary_password = random_generator.generate(
+        length=16, use_upper=True, use_lower=True, use_digits=True, use_symbols=True
+    )
+
+    try:
+        created = get_supabase_admin().auth.admin.create_user(
+            {
+                "email": body.email,
+                "password": temporary_password,
+                "email_confirm": True,
+                "user_metadata": {
+                    "premium": False,
+                    "plan": "Gratuito",
+                    "type_account": "personal",
+                    "org_id": org_id,
+                },
+            }
+        )
+    except Exception as e:
+        if "already registered" in str(e).lower() or "already exists" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe una cuenta con este correo.",
+            )
+        logger.error("No se pudo crear el usuario del trabajador: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo crear la cuenta del trabajador.",
+        )
+
+    new_user_id = created.user.id
+    try:
+        member = dashboard_repo.create_member(
+            org_id=org_id,
+            full_name=body.full_name,
+            email=body.email,
+            role_title=body.role_title,
+            supabase_user_id=new_user_id,
+        )
+        dashboard_repo.create_internal_credential(
+            member_id=member["id"],
+            service_name="SparkGate (cuenta interna)",
+            supabase_user_id=new_user_id,
+        )
+    except Exception as e:
+        # Compensación: un usuario de Auth sin fila de gobernanza es invisible
+        # para el panel y no se puede administrar. Mismo criterio que el borrado
+        # de cuenta, donde delete_user va último para no dejar datos huérfanos.
+        logger.error("Alta de trabajador fallida tras crear el usuario %s: %s", new_user_id, e)
+        get_supabase_admin().auth.admin.delete_user(new_user_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo registrar al trabajador en el panel. No se creó ninguna cuenta.",
+        )
+
+    dashboard_repo.insert_audit_log(
+        org_id=org_id,
+        actor_email=caller.get("email", "unknown"),
+        member_id=member["id"],
+        action="crear_trabajador",
+    )
+    logger.info("Trabajador %s dado de alta en la organización %s", member["id"], org_id)
+
+    member["credentials"] = []
+    return CreateMemberResponse(member=member, temporary_password=temporary_password)
 
 
 @router.get("/audit-log", response_model=list[AuditLogEntryOut])
