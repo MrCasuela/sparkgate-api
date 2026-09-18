@@ -1,0 +1,55 @@
+HU21 E2E — 2026-09-17T21:45:41.673269+00:00
+Base URL: http://localhost:8000
+
+  AVISO: el endpoint público de registro falló (400 'email rate limit exceeded') — típicamente el rate limit de confirmación de Supabase en tier free (ya documentado en HU17). El camino type_account-en-sign_up ya está cubierto por mocks en test_org_accounts.py; acá se sigue por Admin API.
+PASS  1a. Registro de cuenta empresa (fallback Admin API) -> ok
+PASS  1b. type_account=enterprise (fallback, no ejercitado vía endpoint público)
+PASS  1c. La fila en organizations existe
+PASS  2a. POST /dashboard/members -> 201 (fue 201)
+PASS  2b. Devuelve una contraseña temporal
+PASS  2c. El integrante quedó con org_id y supabase_user_id
+PASS  3. Login del trabajador con la contraseña temporal -> 200 (fue 200)
+PASS  4. El trabajador guarda 2 credenciales en su bóveda
+PASS  5a. GET /members/{id}/vault -> 200 con 2 ítems (fue 200)
+PASS  5b. El listado no trae secretos ni criptograma
+PASS  6a. POST .../reveal -> 200 (fue 200)
+PASS  6b. El plaintext coincide con lo que guardó el trabajador
+PASS  7a. El trabajador ve la entrada consultar_admin en su propia auditoría
+PASS  7b. Esa entrada identifica a la empresa como actor (si falla, la mitigación de AC7 NO está cumplida)
+PASS  8a. El panel registra consultar_vault_miembro
+PASS  8b. Esa entrada lleva vault_item_id y credential_id en null
+PASS  9. verify_chain('vault_audit_log') con entradas mixtas (broken_id=None)
+PASS  10a. La segunda empresa no ve al trabajador de la primera
+PASS  10b. Listar la bóveda de un integrante ajeno -> 404 (fue 404)
+PASS  10c. Revelar un ítem ajeno -> 404 (fue 404)
+PASS  11. Cuenta personal en /dashboard/members -> 403 (fue 403)
+PASS  12. Integrante sin cuenta SparkGate -> 200 con lista vacía (fue 200)
+
+13. MANUAL — no automatizado (requiere reiniciar el backend sin
+    VAULT_MASTER_KEY, y este script no reinicia procesos que no le pertenecen):
+    a) Comentar VAULT_MASTER_KEY en .env, reiniciar el backend.
+    b) GET  /api/v1/dashboard/members/8ace1eaa-4ce8-4e08-8450-34affb6aead2/vault -> esperar 200 con los ítems
+       (listar metadata no descifra, así que no depende de la KEK — AC8).
+    c) POST /api/v1/dashboard/members/8ace1eaa-4ce8-4e08-8450-34affb6aead2/vault/3a459b17-6d2b-47e1-baf6-725dc5f4abf6/reveal -> esperar 503.
+    d) Descomentar VAULT_MASTER_KEY y reiniciar antes de seguir usándolo.
+
+14. MANUAL — UI de la extensión (evidencia en docs/evidencia/hu21-ui-manual.txt):
+    a) AC4: login con la cuenta empresa -> el botón 'Panel de administración'
+       aparece; login con una cuenta personal -> no aparece.
+    b) AC2: 'Agregar trabajador' muestra la contraseña temporal una sola vez.
+    c) AC6: 'Ver contraseña' sobre un ítem del trabajador abre el modal con el
+       aviso de que la consulta queda registrada en la auditoría que él ve.
+
+22/22 pasos OK.
+
+--- AC8 verificado en vivo (no manual): 2026-09-17 ---
+Backend reiniciado sin VAULT_MASTER_KEY (comentada en .env), luego restaurado.
+vault_crypto.is_available() -> False durante la prueba, True tras restaurar.
+Login empresa -> 200
+GET  /api/v1/dashboard/members/{trabajador}/vault  sin KEK -> 200, 2 ítems (metadata, sin descifrar)
+POST /api/v1/dashboard/members/{trabajador}/vault/{item}/reveal  sin KEK -> 503
+  {"detail": "El módulo de bóveda no está operativo: falta la clave maestra."}
+Backend reiniciado con VAULT_MASTER_KEY restaurada -> health 200, is_available() -> True.
+
+23/23 pasos OK (22 automatizados + AC8 verificado en vivo).
+Pendiente manual: AC4/AC2/AC6 en la UI de la extensión (docs/evidencia/hu21-ui-manual.txt).
