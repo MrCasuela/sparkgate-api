@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import require_admin
+from app.api.dependencies import require_enterprise
 from app.schemas.dashboard import (
     AuditLogEntryOut,
     CredentialActionRequest,
@@ -30,22 +30,22 @@ def _resolve_password(body: CredentialActionRequest) -> str:
 
 
 @router.get("/members", response_model=list[MemberOut])
-async def list_members(admin: dict = Depends(require_admin)):
-    return dashboard_repo.list_members_with_credentials()
+async def list_members(caller: dict = Depends(require_enterprise)):
+    return dashboard_repo.list_members_with_credentials(caller["org_id"])
 
 
 @router.get("/audit-log", response_model=list[AuditLogEntryOut])
-async def get_audit_log(admin: dict = Depends(require_admin)):
-    return dashboard_repo.list_audit_log()
+async def get_audit_log(caller: dict = Depends(require_enterprise)):
+    return dashboard_repo.list_audit_log(caller["org_id"])
 
 
 @router.post("/credentials/{credential_id}/revoke", response_model=CredentialActionResponse)
 async def revoke_internal_credential(
     credential_id: str,
     body: CredentialActionRequest,
-    admin: dict = Depends(require_admin),
+    caller: dict = Depends(require_enterprise),
 ):
-    credential = dashboard_repo.get_credential(credential_id)
+    credential = dashboard_repo.get_credential(credential_id, caller["org_id"])
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
     if credential["type"] != "interna":
@@ -53,7 +53,7 @@ async def revoke_internal_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Esta acción solo aplica a cuentas internas gestionadas por SparkGate.",
         )
-    if credential.get("supabase_user_id") == admin.get("id"):
+    if credential.get("supabase_user_id") == caller.get("id"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No podés revocar tu propia cuenta de administrador desde este panel.",
@@ -85,7 +85,8 @@ async def revoke_internal_credential(
 
     dashboard_repo.update_credential_status(credential_id, "revocada")
     dashboard_repo.insert_audit_log(
-        actor_email=admin.get("email", "unknown"),
+        org_id=caller["org_id"],
+        actor_email=caller.get("email", "unknown"),
         member_id=credential["member_id"],
         credential_id=credential_id,
         credential_type="interna",
@@ -93,7 +94,7 @@ async def revoke_internal_credential(
     )
     logger.info("Revoked internal credential %s (admin_api_success=%s)", credential_id, admin_api_success)
 
-    updated = dashboard_repo.get_credential(credential_id)
+    updated = dashboard_repo.get_credential(credential_id, caller["org_id"])
     return CredentialActionResponse(credential=updated, admin_api_success=admin_api_success)
 
 
@@ -101,9 +102,9 @@ async def revoke_internal_credential(
 async def suggest_external_credential(
     credential_id: str,
     body: CredentialActionRequest,
-    admin: dict = Depends(require_admin),
+    caller: dict = Depends(require_enterprise),
 ):
-    credential = dashboard_repo.get_credential(credential_id)
+    credential = dashboard_repo.get_credential(credential_id, caller["org_id"])
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
     if credential["type"] != "externa":
@@ -123,7 +124,8 @@ async def suggest_external_credential(
     _resolve_password(body)
     dashboard_repo.update_credential_status(credential_id, "pendiente_aplicacion_manual")
     dashboard_repo.insert_audit_log(
-        actor_email=admin.get("email", "unknown"),
+        org_id=caller["org_id"],
+        actor_email=caller.get("email", "unknown"),
         member_id=credential["member_id"],
         credential_id=credential_id,
         credential_type="externa",
@@ -131,16 +133,16 @@ async def suggest_external_credential(
     )
     logger.info("Suggested password for external credential %s", credential_id)
 
-    updated = dashboard_repo.get_credential(credential_id)
+    updated = dashboard_repo.get_credential(credential_id, caller["org_id"])
     return CredentialActionResponse(credential=updated, admin_api_success=True)
 
 
 @router.post("/credentials/{credential_id}/restore", response_model=CredentialActionResponse)
 async def restore_credential(
     credential_id: str,
-    admin: dict = Depends(require_admin),
+    caller: dict = Depends(require_enterprise),
 ):
-    credential = dashboard_repo.get_credential(credential_id)
+    credential = dashboard_repo.get_credential(credential_id, caller["org_id"])
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
     if credential["status"] == "activa":
@@ -164,7 +166,8 @@ async def restore_credential(
     dashboard_repo.update_credential_status(credential_id, "activa")
     action = "restaurar_interna" if credential["type"] == "interna" else "restaurar_externa"
     dashboard_repo.insert_audit_log(
-        actor_email=admin.get("email", "unknown"),
+        org_id=caller["org_id"],
+        actor_email=caller.get("email", "unknown"),
         member_id=credential["member_id"],
         credential_id=credential_id,
         credential_type=credential["type"],
@@ -172,5 +175,5 @@ async def restore_credential(
     )
     logger.info("Restored credential %s (admin_api_success=%s)", credential_id, admin_api_success)
 
-    updated = dashboard_repo.get_credential(credential_id)
+    updated = dashboard_repo.get_credential(credential_id, caller["org_id"])
     return CredentialActionResponse(credential=updated, admin_api_success=admin_api_success)
