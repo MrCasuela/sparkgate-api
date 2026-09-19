@@ -49,3 +49,12 @@ Sigue SIN registrarse como ejecutado en la UI:
        ejecutor dio una valoración general positiva del panel, pero no detalló
        qué pasos ejecutó, así que no se marca ninguno como PASS individual.
 
+Actualización 2026-09-19 (2)
+  PASS  Exportar CSV de la auditoría del panel: "funciona" según el ejecutor.
+  ---   Etiquetas de las acciones nuevas en la tabla: sin registrar.
+  Nota: la detección de alteración por la cadena hash NO tiene pantalla (el
+        endpoint de verificación es HU19). Se comprobó en vivo contra la base
+        real con scripts/verify_audit_tamper.py; ver docs/evidencia/hu21-audit-tamper.txt
+        (alterar una fila rompe la cadena y señala esa fila; restaurarla la
+        repara; actor_email queda fuera del hash a propósito).
+

@@ -633,9 +633,9 @@ def main() -> None:
     ok_vault, broken_vault = audit_chain.verify_chain("vault_audit_log")
     check(f"23b. verify_chain('vault_audit_log') sigue íntegra (broken_id={broken_vault})", ok_vault)
 
-    skip("24. Alterar una fila del panel y ver la cadena romperse: dejaría rota de forma "
-         "permanente la cadena de desarrollo; está cubierto de forma hermética en "
-         "tests/test_audit_chain.py")
+    skip("24. Alterar una fila del panel y ver la cadena romperse: dejaría rota la cadena de "
+         "desarrollo si no se revierte; se ejercita en vivo, con reversión, en "
+         "scripts/verify_audit_tamper.py y de forma hermética en tests/test_audit_chain.py")
     skip("26. Sin VAULT_MASTER_KEY, PUT /secret y el reveal responden 503: exige reiniciar un "
          "proceso que el script no posee (ver M1)")
 
