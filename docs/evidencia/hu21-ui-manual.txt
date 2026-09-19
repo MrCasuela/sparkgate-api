@@ -29,3 +29,23 @@ PENDIENTE de ejecutar en la UI
        CSV sin errores con entradas de bóveda (credential_id nulo).
   ---  (Opcional) Selector personal/empresa del registro; enviarlo manda un
        mail de confirmación real.
+
+----------------------------------------------------------------------
+Actualización 2026-09-19 (se agrega; lo anterior no se reescribe)
+Ejecutó: Pablo, en el navegador. Fuente: su reporte; sin capturas y sin el
+detalle paso a paso (no se registró con qué cuentas ni qué ítems).
+
+  PASS  AC2  Alta de trabajador desde la UI: "logrado" según el ejecutor.
+  PASS  AC6  "Ver contraseña" desde la UI: "logrado" según el ejecutor.
+  PASS  AC7  Desde la UI, el trabajador ve en su auditoría quién abrió su
+             credencial: "logrado" según el ejecutor.
+
+Sigue SIN registrarse como ejecutado en la UI:
+  ---  Tabla de auditoría del panel: etiquetas de las acciones nuevas y export
+       CSV con entradas de bóveda (credential_id nulo).
+  ---  Selector personal/empresa del registro público (manda un mail real).
+  ---  Etapa C (credenciales de la organización: guardar, ver, reasignar,
+       "Rotar pendiente", pestañas "Empresa" y "Accesos" del trabajador): el
+       ejecutor dio una valoración general positiva del panel, pero no detalló
+       qué pasos ejecutó, así que no se marca ninguno como PASS individual.
+
