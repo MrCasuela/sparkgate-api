@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client
 
@@ -84,3 +84,15 @@ async def require_enterprise(
         )
     user["org_id"] = organization["id"]
     return user
+
+
+async def optional_step_up_code(
+    x_sparkgate_totp: str | None = Header(None, alias="X-SparkGate-TOTP"),
+) -> str | None:
+    """Código de segundo factor que el cliente adjunta a una operación sensible.
+
+    Hoy nadie lo valida (secret_access._verify_step_up es un no-op), pero las rutas
+    que leen secretos ajenos ya lo reciben y lo pasan: cuando HU18 lo implemente, el
+    contrato de las rutas no cambia, solo se empieza a exigir el header.
+    """
+    return x_sparkgate_totp
