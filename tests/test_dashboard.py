@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -70,6 +71,48 @@ def stub_organization(monkeypatch):
         "get_organization_by_owner",
         lambda owner_user_id: {"id": ORG_ID, "owner_user_id": owner_user_id, "name": "PYME Demo"},
     )
+
+
+FAKE_ENVELOPE = {
+    "ciphertext": "Y2lwaGVy",
+    "nonce": "bm9uY2U",
+    "wrapped_dek": "d3JhcHBlZA",
+    "dek_nonce": "ZGVrbm9uY2U",
+    "kek_version": 1,
+}
+
+
+@pytest.fixture(autouse=True)
+def secret_storage(monkeypatch):
+    """revoke, suggest y el alta de trabajador guardan ahora la contraseña cifrada.
+    Se reemplazan el cifrado y el repositorio del sobre para que los tests no toquen
+    Supabase ni dependan de que haya una clave maestra en el entorno, y se devuelve lo
+    que llegó a cada uno para poder asertar sobre ello."""
+    calls = {"sealed": [], "upserts": [], "marked": []}
+
+    def _seal(*, subject_id, password, notes=None):
+        calls["sealed"].append({"subject_id": subject_id, "password": password})
+        return dict(FAKE_ENVELOPE)
+
+    monkeypatch.setattr(dashboard.secret_access, "seal_secret", _seal)
+    monkeypatch.setattr(
+        dashboard.credential_secret_repo, "upsert_secret", lambda **kw: calls["upserts"].append(kw)
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "mark_secret_saved",
+        lambda credential_id, org_id, **kw: calls["marked"].append(credential_id),
+    )
+    # Sin otras credenciales que rotar: el caso de rotación tiene sus propios tests.
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "list_member_credentials", lambda member_id, org_id: []
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "get_member",
+        lambda member_id, org_id: {"id": member_id, "full_name": "Integrante de prueba"},
+    )
+    return calls
 
 
 def credential_lookup_returning(*rows):
@@ -205,7 +248,7 @@ async def test_revoke_rejects_short_password(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_revoke_internal_applies_password_and_bans(client, monkeypatch):
+async def test_revoke_internal_applies_password_and_bans(client, monkeypatch, secret_storage):
     monkeypatch.setattr(
         dashboard.dashboard_repo,
         "get_credential",
@@ -242,9 +285,12 @@ async def test_revoke_internal_applies_password_and_bans(client, monkeypatch):
         "supabase-user-1", {"password": NEW_PASSWORD, "ban_duration": "87600h"}
     )
     assert status_calls == [(ACTIVE_INTERNAL_CREDENTIAL["id"], "revocada")]
+    # Igualdad EXACTA, no subset: es lo que hace hermética la garantía de que el
+    # payload de auditoría no lleva la contraseña.
     assert audit_calls == [
         {
             "org_id": ORG_ID,
+            "actor_user_id": "admin-1",
             "actor_email": "admin@pyme-demo.sparkgate.test",
             "member_id": "member-1",
             "credential_id": ACTIVE_INTERNAL_CREDENTIAL["id"],
@@ -255,10 +301,24 @@ async def test_revoke_internal_applies_password_and_bans(client, monkeypatch):
     for call in audit_calls:
         assert "password" not in call
         assert "new_password" not in call
+        assert NEW_PASSWORD not in json.dumps(call)
+
+    # La contraseña que Auth aceptó vuelve en la respuesta y se guardó cifrada. El AAD
+    # es la ORGANIZACIÓN, no el integrante: por eso reasignar o borrar la cuenta del
+    # trabajador no puede destruir un secreto de la empresa.
+    assert body["applied_password"] == NEW_PASSWORD
+    assert body["secret_stored"] is True
+    assert secret_storage["sealed"] == [{"subject_id": ORG_ID, "password": NEW_PASSWORD}]
+    assert [c["credential_id"] for c in secret_storage["upserts"]] == [
+        ACTIVE_INTERNAL_CREDENTIAL["id"]
+    ]
+    # Lo que llega al repositorio es el sobre cifrado, nunca el texto.
+    assert set(secret_storage["upserts"][0]["envelope"]) == set(FAKE_ENVELOPE)
+    assert NEW_PASSWORD not in json.dumps(secret_storage["upserts"])
 
 
 @pytest.mark.asyncio
-async def test_suggest_external_does_not_call_admin_api(client, monkeypatch):
+async def test_suggest_external_does_not_call_admin_api(client, monkeypatch, secret_storage):
     monkeypatch.setattr(
         dashboard.dashboard_repo,
         "get_credential",
@@ -296,6 +356,10 @@ async def test_suggest_external_does_not_call_admin_api(client, monkeypatch):
     for call in audit_calls:
         assert "password" not in call
         assert "new_password" not in call
+        assert NEW_PASSWORD not in json.dumps(call)
+    # La sugerencia vuelve en la respuesta: antes se descartaba y el panel mostraba la
+    # que él mismo había generado.
+    assert body["suggested_password"] == NEW_PASSWORD
 
 
 @pytest.mark.asyncio
@@ -390,7 +454,8 @@ async def test_audit_log_endpoint_returns_entries(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_revoke_internal_generates_password_server_side(client, monkeypatch):
-    """No new_password body → the backend generates it and never writes it to audit."""
+    """No new_password body → the backend generates it and never writes it to audit.
+    Y ahora esa contraseña vuelve en la respuesta: antes era inobservable, que era el bug."""
     monkeypatch.setattr(
         dashboard.dashboard_repo,
         "get_credential",
@@ -424,14 +489,28 @@ async def test_revoke_internal_generates_password_server_side(client, monkeypatc
     fake_admin_client.auth.admin.update_user_by_id.assert_called_once_with(
         "supabase-user-1", {"password": "SrvGen#Clave#99aA", "ban_duration": "87600h"}
     )
+    # La que el backend generó es la que devuelve: el cliente ya no tiene que inventarla.
+    assert response.json()["applied_password"] == "SrvGen#Clave#99aA"
     assert audit_calls[0]["action"] == "revocar_interna"
     for call in audit_calls:
         assert "password" not in call
         assert "new_password" not in call
+        assert "SrvGen#Clave#99aA" not in json.dumps(call)
 
 
 @pytest.mark.asyncio
-async def test_suggest_external_generates_but_does_not_persist_password(client, monkeypatch):
+async def test_suggest_external_genera_y_guarda_el_secreto_cifrado(
+    client, monkeypatch, secret_storage
+):
+    """Antes: test_suggest_external_generates_but_does_not_persist_password.
+
+    Se invirtió A PROPÓSITO la mitad del invariante que decía que la contraseña
+    sugerida no se persiste: para poder entregársela a un empleado o a su reemplazo, la
+    organización tiene que poder volver a verla, así que se guarda cifrada.
+
+    La otra mitad NO se tocó y es lo que sostiene AC4: ningún payload de auditoría lleva
+    la contraseña. Los bucles de abajo son lo único que sobrevive del test original.
+    """
     monkeypatch.setattr(
         dashboard.dashboard_repo,
         "get_credential",
@@ -463,10 +542,17 @@ async def test_suggest_external_generates_but_does_not_persist_password(client, 
 
     assert response.status_code == 200
     fake_admin_client.auth.admin.update_user_by_id.assert_not_called()
+    assert response.json()["suggested_password"] == "SrvGen#Externa#77zZ"
+    # Mitad invertida: SÍ se persiste, cifrada, con la organización como dueña del dato.
+    assert secret_storage["sealed"] == [{"subject_id": ORG_ID, "password": "SrvGen#Externa#77zZ"}]
+    assert len(secret_storage["upserts"]) == 1
+    assert "SrvGen#Externa#77zZ" not in json.dumps(secret_storage["upserts"])
+    # Mitad intacta: la auditoría nunca lleva la contraseña.
     assert audit_calls[0]["action"] == "sugerir_externa"
     for call in audit_calls:
         assert "password" not in call
         assert "new_password" not in call
+        assert "SrvGen#Externa#77zZ" not in json.dumps(call)
 
 
 @pytest.mark.asyncio

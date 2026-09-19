@@ -60,6 +60,38 @@ def stub_organization(monkeypatch):
     )
 
 
+FAKE_ENVELOPE = {
+    "ciphertext": "Y2lwaGVy",
+    "nonce": "bm9uY2U",
+    "wrapped_dek": "d3JhcHBlZA",
+    "dek_nonce": "ZGVrbm9uY2U",
+    "kek_version": 1,
+}
+
+
+@pytest.fixture(autouse=True)
+def secret_storage(monkeypatch):
+    """El alta guarda la contraseña temporal cifrada. Sin este stub el test pegaría
+    contra el repositorio real del sobre: como el guardado es best-effort, el fallo se
+    tragaría en silencio y nadie lo notaría."""
+    calls = {"sealed": [], "upserts": [], "marked": []}
+
+    def _seal(*, subject_id, password, notes=None):
+        calls["sealed"].append({"subject_id": subject_id, "password": password})
+        return dict(FAKE_ENVELOPE)
+
+    monkeypatch.setattr(dashboard.secret_access, "seal_secret", _seal)
+    monkeypatch.setattr(
+        dashboard.credential_secret_repo, "upsert_secret", lambda **kw: calls["upserts"].append(kw)
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "mark_secret_saved",
+        lambda credential_id, org_id, **kw: calls["marked"].append(credential_id),
+    )
+    return calls
+
+
 def _fake_admin(monkeypatch, create_user_side_effect=None):
     fake = MagicMock()
     if create_user_side_effect is not None:
@@ -111,7 +143,7 @@ async def test_alta_devuelve_contrasena_temporal_y_crea_usuario(client, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_la_contrasena_temporal_no_llega_a_la_auditoria(client, monkeypatch):
+async def test_la_contrasena_temporal_no_llega_a_la_auditoria(client, monkeypatch, secret_storage):
     _fake_admin(monkeypatch)
     audit_calls = []
 
@@ -132,6 +164,7 @@ async def test_la_contrasena_temporal_no_llega_a_la_auditoria(client, monkeypatc
     assert audit_calls == [
         {
             "org_id": ORG_ID,
+            "actor_user_id": "admin-1",
             "actor_email": "admin@pyme-demo.sparkgate.test",
             "member_id": MEMBER_ID,
             "action": "crear_trabajador",
@@ -211,3 +244,72 @@ async def test_email_invalido_es_422(client, monkeypatch):
 
     assert response.status_code == 422
     fake_admin.auth.admin.create_user.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_la_temporal_se_guarda_cifrada_con_la_organizacion_como_dueña(
+    client, monkeypatch, secret_storage
+):
+    """La contraseña temporal es la vigente de la cuenta interna hasta que el trabajador
+    la cambie. Se guarda para que la empresa pueda volver a verla si se le pierde, con
+    la organización como dueña del dato (AAD = org_id) y no el trabajador."""
+    _fake_admin(monkeypatch)
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "create_member", lambda **kwargs: dict(MEMBER_ROW)
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "create_internal_credential",
+        lambda **kwargs: {"id": "cred-interna-1", "member_id": MEMBER_ID},
+    )
+    monkeypatch.setattr(dashboard.dashboard_repo, "insert_audit_log", lambda **kwargs: None)
+
+    async with client as ac:
+        response = await ac.post("/api/v1/dashboard/members", json=REQUEST_BODY)
+
+    body = response.json()
+    assert response.status_code == 201
+    assert body["secret_stored"] is True
+    assert secret_storage["sealed"] == [
+        {"subject_id": ORG_ID, "password": body["temporary_password"]}
+    ]
+    assert [c["credential_id"] for c in secret_storage["upserts"]] == ["cred-interna-1"]
+    # Lo que llega al repositorio es el sobre, nunca la contraseña en claro.
+    assert body["temporary_password"] not in json.dumps(secret_storage["upserts"])
+
+
+@pytest.mark.asyncio
+async def test_si_el_guardado_falla_el_alta_igual_se_completa_y_lo_dice(client, monkeypatch):
+    """Dar de alta a un trabajador no puede depender de que la clave maestra esté arriba.
+    Si el sobre no se puede guardar, la cuenta se crea igual y la respuesta dice
+    secret_stored=false: en ese caso ES la única copia de la contraseña, y el panel tiene
+    que poder avisarlo."""
+    _fake_admin(monkeypatch)
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "create_member", lambda **kwargs: dict(MEMBER_ROW)
+    )
+    monkeypatch.setattr(
+        dashboard.dashboard_repo,
+        "create_internal_credential",
+        lambda **kwargs: {"id": "cred-interna-1", "member_id": MEMBER_ID},
+    )
+    audit_calls = []
+    monkeypatch.setattr(
+        dashboard.dashboard_repo, "insert_audit_log", lambda **kwargs: audit_calls.append(kwargs)
+    )
+
+    def _no_hay_clave(**kwargs):
+        raise RuntimeError("vault_crypto sin clave maestra")
+
+    monkeypatch.setattr(dashboard.secret_access, "seal_secret", _no_hay_clave)
+
+    async with client as ac:
+        response = await ac.post("/api/v1/dashboard/members", json=REQUEST_BODY)
+
+    assert response.status_code == 201
+    assert response.json()["secret_stored"] is False
+    assert response.json()["temporary_password"]
+    # Queda rastro del fallo, sin la contraseña.
+    assert [c["action"] for c in audit_calls] == ["crear_trabajador", "guardar_secreto_fallido"]
+    for call in audit_calls:
+        assert response.json()["temporary_password"] not in json.dumps(call)

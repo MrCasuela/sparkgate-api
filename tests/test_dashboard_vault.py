@@ -138,7 +138,7 @@ async def test_integrante_de_otra_organizacion_responde_404(client, monkeypatch)
         return None  # el repo filtró por org_id y no encontró nada
 
     monkeypatch.setattr(dashboard.dashboard_repo, "get_member", _get_member)
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
 
     async with client as ac:
         listado = await ac.get(f"/api/v1/dashboard/members/{MEMBER_ID}/vault")
@@ -217,7 +217,7 @@ async def test_integrante_sin_cuenta_vinculada_devuelve_lista_vacia(client, monk
 @pytest.mark.asyncio
 async def test_listado_sigue_funcionando_sin_clave_maestra(client, monkeypatch):
     """AC8: listar metadata no descifra nada, así que no depende de la KEK."""
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: False)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: False)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -241,7 +241,7 @@ async def test_listado_sigue_funcionando_sin_clave_maestra(client, monkeypatch):
 async def test_reveal_descifra_con_el_aad_del_dueno_no_el_del_caller(client, monkeypatch):
     """El assert central de HU21. El AAD identifica de quién es el dato, no
     quién pregunta."""
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -255,7 +255,7 @@ async def test_reveal_descifra_con_el_aad_del_dueno_no_el_del_caller(client, mon
         received["aad"] = aad
         return dict(PLAINTEXT)
 
-    monkeypatch.setattr(dashboard.vault_crypto, "decrypt_secret", _decrypt)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "decrypt_secret", _decrypt)
     _vault_audit_recorder(monkeypatch)
     _dashboard_audit_recorder(monkeypatch)
 
@@ -272,7 +272,7 @@ async def test_reveal_descifra_con_el_aad_del_dueno_no_el_del_caller(client, mon
 
 @pytest.mark.asyncio
 async def test_reveal_busca_el_item_bajo_el_dueno(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -285,7 +285,7 @@ async def test_reveal_busca_el_item_bajo_el_dueno(client, monkeypatch):
 
     monkeypatch.setattr(dashboard.vault_repo, "get_item", _get_item)
     monkeypatch.setattr(
-        dashboard.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
+        dashboard.secret_access.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
     )
     _vault_audit_recorder(monkeypatch)
     _dashboard_audit_recorder(monkeypatch)
@@ -300,7 +300,7 @@ async def test_reveal_busca_el_item_bajo_el_dueno(client, monkeypatch):
 async def test_reveal_escribe_las_dos_entradas_de_auditoria(client, monkeypatch):
     """AC7. La entrada del vault es la que ve el trabajador: sin ella la
     mitigación de privacidad de la historia no existe."""
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -308,7 +308,7 @@ async def test_reveal_escribe_las_dos_entradas_de_auditoria(client, monkeypatch)
         dashboard.vault_repo, "get_item", lambda item_id, user_id: dict(STORED_ITEM)
     )
     monkeypatch.setattr(
-        dashboard.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
+        dashboard.secret_access.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
     )
     vault_audit = _vault_audit_recorder(monkeypatch)
     dashboard_audit = _dashboard_audit_recorder(monkeypatch)
@@ -336,6 +336,7 @@ async def test_reveal_escribe_las_dos_entradas_de_auditoria(client, monkeypatch)
     assert dashboard_audit == [
         {
             "org_id": ORG_ID,
+            "actor_user_id": CALLER_ID,
             "actor_email": CALLER_EMAIL,
             "member_id": MEMBER_ID,
             "action": "consultar_vault_miembro",
@@ -346,7 +347,7 @@ async def test_reveal_escribe_las_dos_entradas_de_auditoria(client, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_ningun_payload_de_auditoria_lleva_el_secreto(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -354,7 +355,7 @@ async def test_ningun_payload_de_auditoria_lleva_el_secreto(client, monkeypatch)
         dashboard.vault_repo, "get_item", lambda item_id, user_id: dict(STORED_ITEM)
     )
     monkeypatch.setattr(
-        dashboard.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
+        dashboard.secret_access.vault_crypto, "decrypt_secret", lambda row, aad: dict(PLAINTEXT)
     )
     vault_audit = _vault_audit_recorder(monkeypatch)
     dashboard_audit = _dashboard_audit_recorder(monkeypatch)
@@ -373,7 +374,7 @@ async def test_ningun_payload_de_auditoria_lleva_el_secreto(client, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_item_inexistente_audita_denegado_y_responde_404(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -395,7 +396,7 @@ async def test_item_inexistente_audita_denegado_y_responde_404(client, monkeypat
 
 @pytest.mark.asyncio
 async def test_integrante_sin_cuenta_no_puede_revelarse(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITHOUT_ACCOUNT))
     )
@@ -418,7 +419,7 @@ async def test_integrante_sin_cuenta_no_puede_revelarse(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_reveal_sin_clave_maestra_es_503_y_no_toca_la_base(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: False)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: False)
     get_member = MagicMock()
     get_item = MagicMock()
     monkeypatch.setattr(dashboard.dashboard_repo, "get_member", get_member)
@@ -436,7 +437,7 @@ async def test_reveal_sin_clave_maestra_es_503_y_no_toca_la_base(client, monkeyp
 
 @pytest.mark.asyncio
 async def test_fallo_de_integridad_responde_503_y_audita_error(client, monkeypatch):
-    monkeypatch.setattr(dashboard.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
     monkeypatch.setattr(
         dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT))
     )
@@ -447,7 +448,7 @@ async def test_fallo_de_integridad_responde_503_y_audita_error(client, monkeypat
     def _explode(row, aad):
         raise vault_crypto.InvalidTag()
 
-    monkeypatch.setattr(dashboard.vault_crypto, "decrypt_secret", _explode)
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "decrypt_secret", _explode)
     vault_audit = _vault_audit_recorder(monkeypatch)
     dashboard_audit = _dashboard_audit_recorder(monkeypatch)
 

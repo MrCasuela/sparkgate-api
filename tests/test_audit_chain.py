@@ -1,6 +1,8 @@
 import pytest
 
-from app.services import audit_chain, vault_repo
+from datetime import datetime, timezone
+
+from app.services import audit_chain, dashboard_repo, vault_repo
 
 
 class _FakeResult:
@@ -146,3 +148,226 @@ def test_alterar_el_actor_rompe_la_cadena(fake_admin):
     ok, broken_id = audit_chain.verify_chain(vault_repo.VAULT_AUDIT_TABLE)
     assert ok is False
     assert broken_id == second["id"]
+
+
+# --------------------------------------------------------------------------
+# Cadena por payload jsonb (dashboard_audit_log)
+# --------------------------------------------------------------------------
+
+PANEL_TABLE = "dashboard_audit_log"
+
+
+def test_la_cadena_jsonb_tolera_una_clave_nueva(fake_admin):
+    """Es la prueba de que se aplicó la lección de la cadena por columnas: ahí agregar
+    una columna invalidaba toda la historia (obligó a recrear la tabla en HU21). Con el
+    payload en una columna jsonb, una entrada con una clave más no toca lo ya hasheado."""
+    audit_chain.append_entry_jsonb(PANEL_TABLE, {"action": "crear_trabajador", "org_id": "o1"})
+    audit_chain.append_entry_jsonb(
+        PANEL_TABLE, {"action": "guardar_secreto", "org_id": "o1", "clave_nueva_de_mañana": "x"}
+    )
+    audit_chain.append_entry_jsonb(PANEL_TABLE, {"action": "consultar_secreto", "org_id": "o1"})
+
+    ok, broken_id = audit_chain.verify_chain_jsonb(PANEL_TABLE)
+    assert ok is True
+    assert broken_id is None
+
+
+def test_alterar_el_payload_jsonb_rompe_la_cadena(fake_admin):
+    audit_chain.append_entry_jsonb(PANEL_TABLE, {"action": "crear_trabajador", "actor_user_id": "u1"})
+    second = audit_chain.append_entry_jsonb(
+        PANEL_TABLE, {"action": "consultar_secreto", "actor_user_id": "u1"}
+    )
+    # Falsear quién consultó el secreto, después del hecho.
+    fake_admin._tables[PANEL_TABLE][1]["payload"]["actor_user_id"] = "otro-usuario"
+
+    ok, broken_id = audit_chain.verify_chain_jsonb(PANEL_TABLE)
+    assert ok is False
+    assert broken_id == second["id"]
+
+
+def test_extra_queda_fuera_del_hash_y_se_puede_anular_sin_romper_la_cadena(fake_admin):
+    """actor_email es un dato personal en texto plano. Si el dueño de la cuenta empresa
+    ejerce su derecho de supresión (Ley 21.719) se anula sin romper la cadena: es el
+    mismo dilema que la ADR de supresión ya resolvió para vault_audit_log."""
+    audit_chain.append_entry_jsonb(
+        PANEL_TABLE, {"action": "crear_trabajador"}, extra={"actor_email": "admin@pyme.cl"}
+    )
+    audit_chain.append_entry_jsonb(
+        PANEL_TABLE, {"action": "consultar_secreto"}, extra={"actor_email": "admin@pyme.cl"}
+    )
+    for row in fake_admin._tables[PANEL_TABLE]:
+        row["actor_email"] = None  # supresión
+
+    ok, _ = audit_chain.verify_chain_jsonb(PANEL_TABLE)
+    assert ok is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1.0, 3, datetime(2026, 9, 18, tzinfo=timezone.utc), ["lista"], {"anidado": "x"}],
+)
+def test_el_payload_jsonb_rechaza_valores_que_jsonb_normalizaria(fake_admin, value):
+    """jsonb normaliza los números (1.0 vuelve como 1) y no serializa datetimes: releer
+    cambiaría el json.dumps y rompería el hash sin que nadie tocara la fila. Se rechaza
+    en el origen en vez de descubrirlo en verify_chain."""
+    with pytest.raises(TypeError):
+        audit_chain.append_entry_jsonb(PANEL_TABLE, {"action": "x", "valor": value})
+    assert fake_admin._tables.get(PANEL_TABLE, []) == []
+
+
+def test_insert_audit_log_hashea_el_payload_completo_y_deja_el_email_fuera(fake_admin):
+    entry = dashboard_repo.insert_audit_log(
+        org_id="org-1",
+        actor_user_id="admin-1",
+        actor_email="admin@pyme.cl",
+        member_id="member-1",
+        action="consultar_secreto",
+        credential_id="cred-1",
+        credential_type="externa",
+    )
+    # Igualdad EXACTA del payload: es lo que hace demostrable que ningún secreto entra.
+    assert entry["payload"] == {
+        "org_id": "org-1",
+        "actor_user_id": "admin-1",
+        "member_id": "member-1",
+        "target_member_id": None,
+        "credential_id": "cred-1",
+        "credential_type": "externa",
+        "vault_item_id": None,
+        "action": "consultar_secreto",
+    }
+    assert entry["actor_email"] == "admin@pyme.cl"
+    assert "actor_email" not in entry["payload"]
+    forbidden = {"password", "new_password", "notes", "ciphertext", "wrapped_dek", "secret"}
+    assert forbidden.isdisjoint(entry["payload"])
+    assert audit_chain.verify_chain_jsonb(PANEL_TABLE) == (True, None)
+
+
+def test_list_audit_log_proyecta_solo_claves_conocidas():
+    """Una clave que se agregue al payload más adelante no puede aflorar sola en la
+    respuesta de la API: la proyección es explícita."""
+    flat = dashboard_repo._flatten_audit_row(
+        {
+            "id": "a1",
+            "actor_email": None,
+            "created_at": "2026-09-18T00:00:00Z",
+            "payload": {
+                "action": "reasignar_credencial",
+                "actor_user_id": "u1",
+                "member_id": "m1",
+                "target_member_id": "m2",
+                "clave_futura_no_prevista": "no debe salir",
+            },
+        }
+    )
+    assert flat["target_member_id"] == "m2"
+    assert flat["actor_email"] is None
+    assert "clave_futura_no_prevista" not in flat
+
+
+# --------------------------------------------------------------------------
+# Carrera sobre prev_hash: reintento
+# --------------------------------------------------------------------------
+
+
+class _UniqueViolation(Exception):
+    code = "23505"
+
+
+class _RacyQuery(_FakeQuery):
+    def __init__(self, rows, insert_row, on_insert):
+        super().__init__(rows, insert_row=insert_row)
+        self._on_insert = on_insert
+
+    def execute(self):
+        self._on_insert()
+        return super().execute()
+
+
+class _RacyTable(_FakeTable):
+    def __init__(self, rows, on_insert):
+        super().__init__(rows)
+        self._on_insert = on_insert
+
+    def insert(self, row):
+        return _RacyQuery(self._rows, super().insert(row)._insert_row, self._on_insert)
+
+
+class _RacyAdmin(_FakeAdmin):
+    """Simula que OTRO escritor gana la cola justo antes de nuestro insert: el segundo
+    insert choca con la restricción UNIQUE de prev_hash."""
+
+    def __init__(self, fail_times, error=None):
+        super().__init__()
+        self.fail_times = fail_times
+        self.attempts = 0
+        self.error = error or _UniqueViolation("duplicate key value violates unique constraint")
+
+    def table(self, name):
+        self._tables.setdefault(name, [])
+        return _RacyTable(self._tables[name], lambda: self._race(name))
+
+    def _race(self, name):
+        self.attempts += 1
+        if self.attempts > self.fail_times:
+            return
+        rows = self._tables[name]
+        prev = rows[-1]["entry_hash"] if rows else audit_chain.GENESIS
+        competitor = {"action": "escritura-concurrente"}
+        seq = len(rows) + 1
+        rows.append(
+            {
+                "id": f"id-{seq}",
+                "seq": seq,
+                "created_at": f"2026-01-01T00:00:{seq:02d}Z",
+                **competitor,
+                "prev_hash": prev,
+                "entry_hash": audit_chain.compute_hash(prev, competitor),
+            }
+        )
+        raise self.error
+
+
+@pytest.fixture
+def racy_admin(monkeypatch):
+    def _make(fail_times, error=None):
+        admin = _RacyAdmin(fail_times, error)
+        monkeypatch.setattr(audit_chain, "get_supabase_admin", lambda: admin)
+        return admin
+
+    return _make
+
+
+def test_append_reintenta_cuando_otra_escritura_gana_la_cola(racy_admin):
+    admin = racy_admin(fail_times=1)
+    entry = audit_chain.append_entry("t", {"action": "guardar"})
+
+    assert admin.attempts == 2
+    rows = admin._tables["t"]
+    assert [r["action"] for r in rows] == ["escritura-concurrente", "guardar"]
+    # El reintento recalculó desde la cola NUEVA: reintentar el mismo insert habría
+    # repetido el mismo prev_hash y vuelto a chocar.
+    assert entry["prev_hash"] == rows[0]["entry_hash"]
+    assert audit_chain.verify_chain("t") == (True, None)
+
+
+def test_append_jsonb_tambien_reintenta(racy_admin):
+    admin = racy_admin(fail_times=2)
+    audit_chain.append_entry_jsonb("t", {"action": "consultar_secreto"})
+
+    assert admin.attempts == 3
+    assert len(admin._tables["t"]) == 3  # dos concurrentes + la nuestra
+
+
+def test_append_se_rinde_tras_los_intentos_maximos(racy_admin):
+    admin = racy_admin(fail_times=99)
+    with pytest.raises(_UniqueViolation):
+        audit_chain.append_entry("t", {"action": "guardar"})
+    assert admin.attempts == audit_chain.MAX_APPEND_ATTEMPTS
+
+
+def test_un_error_que_no_es_colision_no_se_reintenta(racy_admin):
+    admin = racy_admin(fail_times=99, error=RuntimeError("la base se cayó"))
+    with pytest.raises(RuntimeError):
+        audit_chain.append_entry("t", {"action": "guardar"})
+    assert admin.attempts == 1
