@@ -11,7 +11,7 @@ from app.schemas.auth import (
     RegisterRequest,
     RegisterResponse,
 )
-from app.services import dashboard_repo, vault_repo
+from app.services import dashboard_repo, org_repo, vault_repo
 from app.services.db_client import create_auth_client, get_supabase_admin
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -26,7 +26,18 @@ async def register(body: RegisterRequest):
         result = supabase.auth.sign_up({
             "email": body.email,
             "password": body.password,
-            "options": {"data": {"premium": False, "plan": "Gratuito"}},
+            # type_account viaja en el sign_up, no en un update posterior: el
+            # access_token que devolvemos abajo se mintea acá, así que un update
+            # por Admin API llegaría tarde y la empresa recién vería su panel
+            # tras re-loguearse. El org_id sí queda fuera (la organización aún
+            # no existe) y no hace falta: el guard nunca lee ese claim.
+            "options": {
+                "data": {
+                    "premium": False,
+                    "plan": "Gratuito",
+                    "type_account": body.type_account,
+                }
+            },
         })
     except Exception as e:
         if "already registered" in str(e).lower() or "already exists" in str(e).lower():
@@ -46,11 +57,32 @@ async def register(body: RegisterRequest):
             detail="Este correo ya está registrado. Inicia sesión con tu cuenta existente.",
         )
 
+    if body.type_account == "enterprise":
+        organization = org_repo.create_organization(
+            owner_user_id=result.user.id, name=body.organization_name
+        )
+        # user_metadata completo: da igual si GoTrue mergea o reemplaza.
+        get_supabase_admin().auth.admin.update_user_by_id(
+            result.user.id,
+            {
+                "user_metadata": {
+                    "premium": False,
+                    "plan": "Gratuito",
+                    "type_account": "enterprise",
+                    "org_id": organization["id"],
+                }
+            },
+        )
+        logger.info(
+            "Organización %s creada para el usuario %s", organization["id"], result.user.id
+        )
+
     return RegisterResponse(
         message="User registered",
         user_id=result.user.id,
         plan="Gratuito",
         access_token=result.session.access_token if result.session else None,
+        type_account=body.type_account,
     )
 
 
@@ -72,6 +104,7 @@ async def login(body: LoginRequest):
         access_token=result.session.access_token,
         user_id=result.user.id,
         premium=user_metadata.get("premium", False),
+        type_account=user_metadata.get("type_account", "personal"),
     )
 
 

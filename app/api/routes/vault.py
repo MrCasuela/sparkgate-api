@@ -66,7 +66,27 @@ async def get_item(item_id: str, user: dict = Depends(require_user)):
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
 
-    secret = vault_crypto.decrypt_secret(item, aad=user_id)
+    try:
+        secret = vault_crypto.decrypt_secret(item, aad=user_id)
+    except vault_crypto.InvalidTag:
+        # El tag GCM no cuadra: la fila fue movida, adulterada, o la KEK cambió.
+        # No es un 404 (esconder una adulteración es justo lo que el tag existe
+        # para evitar) ni un 500: desde el cliente, el módulo no puede servir
+        # este ítem, igual que cuando falta la clave maestra.
+        vault_repo.insert_audit(
+            user_id=user_id, item_id=item_id, action="consultar", result="error"
+        )
+        logger.error(
+            "Vault item %s: fallo de integridad al descifrar (kek_version=%s)",
+            item_id,
+            item.get("kek_version"),
+        )
+        raise ServiceUnavailableError(
+            "Vault",
+            detail="No se pudo descifrar la credencial: el registro no supera "
+            "la verificación de integridad.",
+        )
+
     vault_repo.insert_audit(user_id=user_id, item_id=item_id, action="consultar", result="ok")
     logger.info("Vault item %s decrypted for user %s", item_id, user_id)
     return VaultSecretOut(

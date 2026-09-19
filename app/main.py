@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import health, auth, passwords, dashboard, vault
+from app.api.routes import health, auth, passwords, dashboard, vault, me
 from app.core.config import settings
 from app.core.exceptions import (
     ServiceUnavailableError,
@@ -44,6 +44,7 @@ app.include_router(auth.router)
 app.include_router(passwords.router)
 app.include_router(dashboard.router)
 app.include_router(vault.router)
+app.include_router(me.router)
 
 app.add_exception_handler(ServiceUnavailableError, service_unavailable_handler)
 app.add_exception_handler(HIBPError, hibp_error_handler)

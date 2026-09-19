@@ -170,3 +170,97 @@ async def test_delete_user_failure_returns_502_after_data_already_purged(client,
     assert CORRECT_PASSWORD not in response.json()["detail"]
     # the purge and audit entry already happened before delete_user was attempted
     assert audit_calls[0]["action"] == "eliminar_cuenta"
+
+
+def test_borrar_la_cuenta_borra_el_sobre_de_las_internas_antes_de_cortar_el_vinculo():
+    """SparkGate guarda cifrada la contraseña vigente de las cuentas internas. Si la cuenta se
+    borra (Ley 21.719), conservar ese sobre sería retener la contraseña de una cuenta que ya
+    no existe. Tiene que borrarse ANTES de cortar el vínculo: después ya no habría cómo saber a
+    qué credenciales pertenecía."""
+    from types import SimpleNamespace
+
+    from app.services import dashboard_repo
+
+    events = []
+
+    class _Chain:
+        def __init__(self, table):
+            self.table_name, self.op = table, None
+
+        def select(self, *a, **k):
+            self.op = "select"
+            return self
+
+        def update(self, fields):
+            self.op = "update"
+            return self
+
+        def eq(self, *a):
+            return self
+
+        def execute(self):
+            events.append((self.table_name, self.op))
+            return SimpleNamespace(data=[{"id": "c1"}, {"id": "c2"}])
+
+    admin = SimpleNamespace(table=lambda name: _Chain(name))
+    original_admin = dashboard_repo.get_supabase_admin
+    original_delete = dashboard_repo.credential_secret_repo.delete_secrets_for_credentials
+    dashboard_repo.get_supabase_admin = lambda: admin
+    dashboard_repo.credential_secret_repo.delete_secrets_for_credentials = (
+        lambda ids: events.append(("sobres-borrados", tuple(ids)))
+    )
+    try:
+        detached = dashboard_repo.detach_supabase_user("user-1")
+    finally:
+        dashboard_repo.get_supabase_admin = original_admin
+        dashboard_repo.credential_secret_repo.delete_secrets_for_credentials = original_delete
+
+    assert detached == 2
+    assert events.index(("sobres-borrados", ("c1", "c2"))) < events.index(
+        ("dashboard_credentials", "update")
+    )
+
+
+def test_borrar_la_cuenta_no_toca_el_username_de_las_credenciales_de_la_organizacion(monkeypatch):
+    """R-HU21-9, decidido: el `username` de una credencial (el correo de una cuenta de rol,
+    p. ej. admin@pyme.cl) es dato de la EMPRESA, no del trabajador que la usaba. La supresión
+    de este último corta el vínculo con su cuenta y borra el sobre de su interna, pero no
+    puede vaciar lo que la empresa necesita para saber cuál cuenta es."""
+    from types import SimpleNamespace
+
+    from app.services import dashboard_repo
+
+    updates = []
+
+    class _Chain:
+        def __init__(self, table):
+            self.table_name = table
+
+        def select(self, *a, **k):
+            return self
+
+        def update(self, fields):
+            updates.append((self.table_name, dict(fields)))
+            return self
+
+        def eq(self, *a):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[{"id": "c1"}])
+
+    monkeypatch.setattr(dashboard_repo, "get_supabase_admin", lambda: SimpleNamespace(table=_Chain))
+    monkeypatch.setattr(
+        dashboard_repo.credential_secret_repo, "delete_secrets_for_credentials", lambda ids: None
+    )
+
+    dashboard_repo.detach_supabase_user("user-1")
+
+    assert updates, "la supresión tiene que cortar el vínculo"
+    for table, fields in updates:
+        assert "username" not in fields, f"{table}: la supresión anuló el username"
+        assert "service_name" not in fields and "org_id" not in fields
+    assert {t: set(f) - {"updated_at"} for t, f in updates} == {
+        "dashboard_credentials": {"supabase_user_id"},
+        "dashboard_members": {"supabase_user_id"},
+    }

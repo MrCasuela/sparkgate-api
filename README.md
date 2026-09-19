@@ -77,11 +77,20 @@ datos y flujos en [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
 | DELETE | /api/v1/auth/account | Delete own account + all vault data (irreversible, Ley 21.719) |
 | POST | /api/v1/passwords/evaluate | Evaluate password |
 | POST | /api/v1/passwords/generate | Generate password |
-| GET | /api/v1/dashboard/members | List members + credentials (admin) |
-| GET | /api/v1/dashboard/audit-log | Audit log (admin) |
-| POST | /api/v1/dashboard/credentials/{id}/revoke | Revoke internal credential (admin) |
-| POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest external credential password (admin) |
-| POST | /api/v1/dashboard/credentials/{id}/restore | Restore credential (admin) |
+| GET | /api/v1/dashboard/members | List members + credentials of the caller's org (enterprise) |
+| POST | /api/v1/dashboard/members | Provision a worker account, returns a one-time temporary password (enterprise) |
+| GET | /api/v1/dashboard/audit-log | Audit log of the caller's org (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/revoke | Revoke internal credential (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest external credential password (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/restore | Restore credential (enterprise) |
+| GET | /api/v1/dashboard/members/{id}/vault | Worker's vault metadata, never decrypts (enterprise) |
+| POST | /api/v1/dashboard/members/{id}/vault/{item}/reveal | Decrypt a worker's credential; writes to both audit logs (enterprise) |
+| GET/POST | /api/v1/dashboard/credentials | List (`?assigned=false` = unassigned pool) / register an external account (enterprise) |
+| PUT | /api/v1/dashboard/credentials/{id}/secret | Store or replace the organization's password for an account; never echoes it (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/secret/reveal | Decrypt an organization credential (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/reassign | Hand an external account to the replacement, or back to the pool (enterprise) |
+| GET | /api/v1/me/credentials | What the organization assigned to the logged-in worker (any user) |
+| POST | /api/v1/me/credentials/{id}/reveal | The worker retrieves an assigned credential (any user) |
 | POST | /api/v1/vault/items | Save an encrypted credential (HU17 AC1/AC2) |
 | GET | /api/v1/vault/items | List own credentials (metadata only, never decrypted) |
 | GET | /api/v1/vault/items/{id} | Decrypt and return own credential (HU17 AC3) |

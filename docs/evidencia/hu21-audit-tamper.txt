@@ -1,0 +1,13 @@
+Filas en la cadena: 75
+PASS  1. Cadena íntegra antes de tocar nada
+Fila objetivo: seq=38 id=23d611f2-6aaa-4714-9f06-4289c0f55c0f
+Payload original (para restaurar a mano si hiciera falta): {'action': 'crear_trabajador', 'org_id': '491b6918-adc0-4344-bbac-13b878f62989', 'member_id': '92a2b5b9-e5e9-4766-b8f3-af91a081a2aa', 'actor_user_id': '9e01af3a-b915-4db8-b42c-9ba3842cdbbe', 'credential_id': None, 'vault_item_id': None, 'credential_type': None, 'target_member_id': None}
+actor_email original: 'sparkgate.e2e.hu21.e1.191d3fdb@example.com'
+PASS  2a. Alterar actor_user_id de una fila rompe la cadena
+PASS  2b. Y señala EXACTAMENTE esa fila
+PASS  3. Restaurado el payload, la cadena vuelve a ser íntegra
+PASS  4. Cambiar actor_email (fuera del hash) NO rompe la cadena
+PASS  5. Estado final: cadena íntegra y actor_email restaurado
+PASS  6. La fila quedó idéntica a como estaba
+
+TODO OK

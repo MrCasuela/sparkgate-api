@@ -36,4 +36,8 @@ class VaultAuditEntryOut(BaseModel):
     item_id: str | None = None
     action: str
     result: str
+    # Quién consultó, cuando no fue el propio dueño (HU21 AC7). Es la mitigación
+    # de privacidad de la historia: sin exponerlo acá, el trabajador no puede
+    # ver que su empresa abrió sus credenciales aunque la fila esté en la base.
+    actor_user_id: str | None = None
     created_at: datetime
