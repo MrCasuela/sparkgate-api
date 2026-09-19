@@ -200,7 +200,9 @@ erDiagram
     organizations ||--o{ dashboard_members : "org_id FK"
     auth_users ||..o| dashboard_credentials : "supabase_user_id (lógica, sin FK)"
     auth_users ||..o| dashboard_members : "supabase_user_id (lógica, sin FK)"
-    dashboard_members ||--o{ dashboard_credentials : "member_id FK, on delete cascade"
+    dashboard_members |o--o{ dashboard_credentials : "member_id FK nullable, on delete SET NULL"
+    organizations ||--o{ dashboard_credentials : "org_id FK (la credencial es de la organización)"
+    dashboard_credentials ||--o| dashboard_credential_secrets : "credential_id PK/FK, on delete cascade"
     dashboard_members ||..o{ dashboard_audit_log : "member_id (lógica, sin FK)"
     dashboard_credentials ||..o{ dashboard_audit_log : "credential_id (lógica, sin FK)"
 
@@ -230,23 +232,37 @@ erDiagram
 
     dashboard_credentials {
         uuid id PK "gen_random_uuid()"
-        uuid member_id FK "on delete cascade"
+        uuid org_id FK "tenencia real; es el AAD del secreto"
+        uuid member_id FK "nullable: null = pool sin asignar; on delete set null"
         text type "check in (interna, externa)"
         text service_name "not null"
+        text username "nullable"
         uuid supabase_user_id "solo interna"
         text status "activa | revocada | pendiente_aplicacion_manual"
+        timestamptz secret_updated_at "hay secreto guardado y cuándo se rotó"
+        bool rotation_required "se apaga solo guardando una contraseña nueva"
         timestamptz updated_at "default now()"
     }
 
+    dashboard_credential_secrets {
+        uuid credential_id PK "FK, on delete cascade"
+        uuid org_id FK "redundante A PROPÓSITO: el AAD sale de esta fila"
+        text ciphertext "AES-256-GCM, base64"
+        text nonce "base64"
+        text wrapped_dek "DEK envuelta con la KEK"
+        text dek_nonce "base64"
+        int kek_version "default 1"
+    }
+
     dashboard_audit_log {
+        bigserial seq "orden de la cadena"
         uuid id PK "gen_random_uuid()"
-        uuid org_id "not null, aislamiento"
-        text actor_email "quien ejecuta"
-        uuid member_id
-        uuid credential_id "nullable: los eventos de bóveda no tienen"
-        text credential_type "nullable"
-        uuid vault_item_id "solo eventos de bóveda"
-        text action
+        uuid org_id "GENERADA de payload->>org_id"
+        text action "GENERADA de payload->>action, con check"
+        jsonb payload "LO QUE SE HASHEA: org, actor_user_id, member, credential..."
+        text actor_email "FUERA del hash: dato personal, anulable por supresión"
+        text prev_hash UK "hash de la entrada anterior"
+        text entry_hash "sha256(prev_hash + payload)"
         timestamptz created_at "default now()"
     }
 
@@ -272,7 +288,7 @@ erDiagram
         uuid id PK "gen_random_uuid()"
         uuid user_id "seudónimo tras borrar la cuenta"
         uuid item_id "nullable"
-        text action "guardar|listar|consultar|consultar_denegado|eliminar|eliminar_denegado|eliminar_todo|eliminar_cuenta|listar_admin|consultar_admin|consultar_admin_denegado"
+        text action "guardar|listar|consultar|consultar_denegado|eliminar|eliminar_denegado|eliminar_todo|eliminar_cuenta|listar_admin|consultar_admin|consultar_admin_denegado|consultar_credencial_interna_admin"
         text result "ok|denegado|error"
         int deleted_count "solo eliminar_todo/eliminar_cuenta"
         uuid actor_user_id "null = el dueño; si no, quién consultó (HU21)"
@@ -443,10 +459,16 @@ se hace por el panel (ban + rotación de contraseña).
 | Sin contraseñas en el audit log | `dashboard.py`, `dashboard_repo.py` | AC4 — solo actor/acción |
 | CORS por orígenes exactos + regex | `main.py` | wildcards traducidos a regex |
 | Envelope encryption (DEK/KEK) | `vault_crypto.py` | AES-256-GCM, KEK en `.env`, nunca en DB ni logs (HU17 AC2) |
-| Ciphertext ligado al dueño | `vault_crypto.py` | AAD=`user_id` del **dueño** (no del caller); `InvalidTag` si se descifra bajo otro dueño |
+| Ciphertext ligado al sujeto dueño | `vault_crypto.py`, `secret_access.py` | AAD = id del **sujeto dueño** leído de la MISMA fila que el criptograma: `user_id` de una persona o `org_id` de la organización. Nunca el del caller |
 | Fallo de integridad visible, no silencioso | `vault.py`, `dashboard.py` | `InvalidTag` → 503 + auditoría `result="error"`; nunca 404 (escondería la adulteración) ni 500 |
 | Aislamiento entre organizaciones | `dashboard_repo.py`, `dependencies.py` | `.eq("org_id", ...)` en cada consulta; el `org_id` lo resuelve `require_enterprise` contra la tabla `organizations`, nunca desde el claim del token (HU21 AC3) |
 | El claim de tenencia solo puede negar | `dependencies.py` | `user_metadata.org_id` se aplana como `claimed_org_id`; la clave `org_id` que leen los handlers la escribe únicamente el guard tras consultar la tabla |
+| Toda lectura de un secreto ajeno pasa por un único punto | `secret_access.py` | `read_foreign_secret`: KEK → segundo factor (HU18, hoy no-op) → descifrado. Un test escanea `app/api/routes/` y falla si otra ruta descifra |
+| El criptograma solo lo nombran dos módulos | `credential_secret_repo.py`, `vault_crypto.py` | test hermético sobre el código fuente; los listados usan columnas explícitas, nunca `select("*")` |
+| La credencial es de la organización y sobrevive al integrante | `sql/dashboard_schema.sql` | `member_id` nullable + `ON DELETE SET NULL`; el secreto no depende de `supabase_user_id` |
+| El log de la organización es una cadena verificable | `audit_chain.py` | payload jsonb hasheado; `actor_email` fuera del hash; `append_entry` reintenta ante colisión de `prev_hash` |
+| El borrado de cuenta no retiene la contraseña de una cuenta que ya no existe | `dashboard_repo.py` | `detach_supabase_user` borra el sobre de las internas ANTES de cortar el vínculo |
+| Ninguna contraseña llega a ningún payload de auditoría | `dashboard.py`, `me.py` | las contraseñas SÍ se persisten (cifradas) pero nunca a los logs; probado por mutación |
 | Recurso de otra organización → 404 | `dashboard.py` | integrante y credencial ajenos responden igual que los inexistentes, nunca 403 |
 | Toda lectura de bóveda ajena queda doblemente registrada | `dashboard.py` | `vault_audit_log` con `actor_user_id` (lo ve **el trabajador**) + `dashboard_audit_log` (lo ve la empresa) — HU21 AC7 |
 | Vault rechaza sin KEK, sin persistir en claro | `vault.py` | `is_available()` chequeado antes de cualquier escritura (AC5) |
@@ -519,6 +541,13 @@ flowchart LR
 | POST | `/api/v1/dashboard/credentials/{id}/restore` | empresa | `dashboard_repo` + Admin API | interna/externa |
 | GET | `/api/v1/dashboard/members/{id}/vault` | empresa | `dashboard_repo` + `vault_repo` | metadata del trabajador, no descifra; sin cuenta vinculada → `[]` (HU21 AC5) |
 | POST | `/api/v1/dashboard/members/{id}/vault/{item}/reveal` | empresa | `vault_repo` + `vault_crypto` | descifra con el AAD del **dueño**; doble auditoría (HU21 AC6/AC7) |
+| GET | `/api/v1/dashboard/credentials` | empresa | `dashboard_repo` | `?assigned=false` = pool sin asignar (etapa C) |
+| POST | `/api/v1/dashboard/credentials` | empresa | `dashboard_repo` + `secret_access` | registra una cuenta externa; contraseña opcional, cifrada con AAD = org |
+| PUT | `/api/v1/dashboard/credentials/{id}/secret` | empresa | `secret_access` + `credential_secret_repo` | guarda/reemplaza; nunca devuelve el plaintext; `apply_to_account` (interna) va primero a Auth |
+| POST | `/api/v1/dashboard/credentials/{id}/secret/reveal` | empresa | `secret_access` | POST a propósito; interna ⇒ además entrada en la auditoría del trabajador |
+| POST | `/api/v1/dashboard/credentials/{id}/reassign` | empresa | `dashboard_repo` | solo externas; no re-cifra; sugiere rotar la que cambia de manos |
+| GET | `/api/v1/me/credentials` | usuario | `dashboard_repo` | lo que la empresa le asignó al trabajador (router propio, `require_user`) |
+| POST | `/api/v1/me/credentials/{id}/reveal` | usuario | `secret_access` | el trabajador retira su credencial; 403 si su cuenta interna está revocada |
 | POST | `/api/v1/vault/items` | usuario | `vault_crypto` + `vault_repo` | 503 si falta la KEK (AC5) |
 | GET | `/api/v1/vault/items` | usuario | `vault_repo` | metadatos, nunca descifra |
 | GET | `/api/v1/vault/items/{id}` | usuario | `vault_repo` + `vault_crypto` | 404 si no es del dueño (AC3) |

@@ -329,3 +329,30 @@ trabajador hace fallar el segundo insert por violación de unicidad, sin captura
 500. La carrera ya existía entre usuarios; esta historia la hace bastante más
 probable. Mitigación pendiente: reintentar releyendo la cola (~10 líneas en
 `append_entry`).
+
+
+---
+
+## 9. Etapa C — credenciales propias de la organización (2026-09-18)
+
+Nace de un pedido posterior al diseño original: la empresa necesita **saber** la contraseña de
+las cuentas que tiene, para entregársela a un empleado o a su reemplazo. Decisiones, riesgos
+(R-HU21-5 a R-HU21-8 y R-HU21-10) y correcciones al plan de esta etapa están en la bóveda:
+`decisions/2026-09-18-credenciales-propias-de-la-organizacion.md` y
+`decisions/2026-09-18-aad-generalizado-al-sujeto-dueno.md`.
+
+Lo que cambió respecto del diseño de A y B:
+
+- **El invariante "la contraseña sugerida no se persiste" se invierte** (V9 de la extensión): se
+  guarda cifrada. La otra mitad no cambia: ninguna contraseña llega a un payload de auditoría.
+- **El AAD se generaliza** al sujeto dueño del dato: `org_id` para credenciales de la
+  organización. La credencial sobrevive al borrado del integrante (`ON DELETE SET NULL`).
+- **`dashboard_audit_log` pasa a ser una cadena hash** con payload jsonb, y `actor_email` queda
+  fuera del hash.
+- **Punto de paso único** `secret_access.read_foreign_secret`: HU18 = implementar
+  `_verify_step_up`.
+- **R-HU21-4 queda cerrado**: `append_entry` reintenta ante colisión de `prev_hash`.
+
+**Hallazgo medido:** la ventana de ~1 hora de un access token tras un revoke (V10) no existe en
+esta ruta: banear o cambiar la contraseña invalida el token de inmediato, porque `verify_token`
+consulta a GoTrue en cada request. Ver `docs/evidencia/hu21-e2e.txt`.
