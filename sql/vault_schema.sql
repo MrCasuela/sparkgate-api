@@ -36,7 +36,11 @@ create table if not exists vault_audit_log (
     'guardar', 'listar', 'consultar', 'consultar_denegado',
     'eliminar', 'eliminar_denegado', 'eliminar_todo', 'eliminar_cuenta',
     -- HU21: la empresa consultando la bóveda de un trabajador.
-    'listar_admin', 'consultar_admin', 'consultar_admin_denegado'
+    'listar_admin', 'consultar_admin', 'consultar_admin_denegado',
+    -- HU21 etapa C: la empresa retiró la contraseña vigente de la cuenta SparkGate
+    -- del trabajador. user_id es el trabajador; item_id va nulo. Cambiar este CHECK no
+    -- cambia el conjunto de columnas, así que no invalida la cadena.
+    'consultar_credencial_interna_admin'
   )),
   result text not null default 'ok' check (result in ('ok', 'denegado', 'error')),
   deleted_count int,

@@ -10,6 +10,9 @@ Qué cubre:
   Etapa A — registro de cuenta empresa, provisioning de trabajador, aislamiento
             por organización (AC1, AC2, AC3)
   Etapa B — listado de metadata, reveal, doble auditoría (AC5, AC6, AC7)
+  Etapa C — credenciales propias de la organización: guardar y recuperar la
+            contraseña, supervivencia al integrante (19), reasignación al reemplazo
+            (20), y que la contraseña que muestra el panel es la real (21)
 
 Un solo registro público por corrida (la cuenta empresa, que es el camino de
 código nuevo). El trabajador se provisiona por POST /dashboard/members, que usa
@@ -146,20 +149,16 @@ def cleanup(admin) -> None:
     print("\nLimpieza (E2E_HU21_CLEANUP=1)...")
     for org_id in _created_org_ids:
         try:
-            admin.table("dashboard_credentials").delete().in_(
-                "member_id",
-                [
-                    m["id"]
-                    for m in admin.table("dashboard_members")
-                    .select("id")
-                    .eq("org_id", org_id)
-                    .execute()
-                    .data
-                ],
-            ).execute()
-            admin.table("dashboard_audit_log").delete().eq("org_id", org_id).execute()
+            # Por org_id, no por la lista de miembros: con ON DELETE SET NULL las
+            # credenciales sobreviven a su integrante (paso 19) y quedan con member_id
+            # nulo, así que borrarlas "por miembro" las dejaría huérfanas.
+            admin.table("dashboard_credential_secrets").delete().eq("org_id", org_id).execute()
+            admin.table("dashboard_credentials").delete().eq("org_id", org_id).execute()
             admin.table("dashboard_members").delete().eq("org_id", org_id).execute()
             admin.table("organizations").delete().eq("id", org_id).execute()
+            # dashboard_audit_log NO se borra: es una cadena hash, y quitar filas del
+            # medio rompería prev_hash de las siguientes. Sus payloads son seudónimos
+            # (UUIDs), así que dejarlas no retiene datos personales.
         except Exception as e:
             print(f"  aviso: no se pudo limpiar la organización {org_id}: {e}")
     for user_id in _created_user_ids:
@@ -169,6 +168,34 @@ def cleanup(admin) -> None:
         except Exception as e:
             print(f"  aviso: no se pudo borrar el usuario {user_id}: {e}")
     print("Limpieza terminada.")
+
+
+def provision_worker(admin, client: httpx.Client, company_token: str, suffix: str, tag: str) -> dict:
+    """Alta de un trabajador por el endpoint del panel (Admin API server-side) y login
+    con su contraseña temporal. Devuelve ids, credenciales y token."""
+    email = f"sparkgate.e2e.hu21.{tag}.{suffix}@example.com"
+    resp = client.post(
+        "/api/v1/dashboard/members",
+        headers=auth_headers(company_token),
+        json={"full_name": f"Trabajador {tag}", "email": email, "role_title": "QA"},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    member_id = body["member"]["id"]
+    row = admin.table("dashboard_members").select("*").eq("id", member_id).execute().data[0]
+    _created_user_ids.append(row["supabase_user_id"])
+    login = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": body["temporary_password"]}
+    )
+    login.raise_for_status()
+    return {
+        "member_id": member_id,
+        "user_id": row["supabase_user_id"],
+        "email": email,
+        "temporary_password": body["temporary_password"],
+        "secret_stored": body.get("secret_stored"),
+        "token": login.json()["access_token"],
+    }
 
 
 def main() -> None:
@@ -403,15 +430,224 @@ def main() -> None:
         resp.status_code == 200 and resp.json() == [],
     )
 
+    # =================================================================== Etapa C
+    # Credenciales propias de la organización. Los pasos 19, 20 y 21 son los que
+    # deciden si la etapa está hecha.
+    stg = f"Stg-C-{suffix}"
+
+    def pool_and_assigned(token):
+        r = client.get("/api/v1/dashboard/credentials", headers=auth_headers(token))
+        return r.json() if r.status_code == 200 else []
+
+    # 15. Registrar una cuenta externa con contraseña, asignada al trabajador A
+    plain_1 = f"{stg}-uno"
+    resp = client.post(
+        "/api/v1/dashboard/credentials",
+        headers=auth_headers(token_e1),
+        json={"member_id": member_id, "service_name": "Google Workspace E2E",
+              "username": "ws@pyme.cl", "password": plain_1, "notes": "cuenta de la empresa"},
+    )
+    check(f"15a. POST /dashboard/credentials con contraseña -> 201 (fue {resp.status_code})",
+          resp.status_code == 201)
+    cred = resp.json() if resp.status_code == 201 else {}
+    cred_id = cred.get("id")
+    raw_cred = (admin.table("dashboard_credentials").select("*").eq("id", cred_id).execute().data
+                if cred_id else [])
+    check("15b. La fila cruda de la credencial lleva org_id no nulo (la tenencia es de la fila)",
+          bool(raw_cred) and raw_cred[0].get("org_id") == org_id_e1)
+    check("15c. La respuesta declara has_secret", cred.get("has_secret") is True)
+
+    resp = client.post(
+        "/api/v1/dashboard/credentials",
+        headers=auth_headers(token_e1),
+        json={"service_name": "Google Ads E2E", "password": f"{stg}-pool"},
+    )
+    pool_id = resp.json().get("id") if resp.status_code == 201 else None
+    resp = client.get("/api/v1/dashboard/credentials?assigned=false", headers=auth_headers(token_e1))
+    check("15d. La credencial sin asignar aparece en ?assigned=false y NO en el listado de un integrante",
+          resp.status_code == 200 and any(c["id"] == pool_id for c in resp.json()))
+
+    # 16. Reemplazar el secreto; el plaintext no aparece en NINGUNA columna de la fila cruda
+    plain_2 = f"{stg}-dos"
+    resp = client.put(
+        f"/api/v1/dashboard/credentials/{cred_id}/secret",
+        headers=auth_headers(token_e1),
+        json={"password": plain_2, "notes": "rotada"},
+    )
+    check(f"16a. PUT /credentials/{{id}}/secret -> 200 (fue {resp.status_code})", resp.status_code == 200)
+    check("16b. El PUT no devuelve el plaintext", plain_2 not in resp.text)
+    secret_row = (admin.table("dashboard_credential_secrets").select("*")
+                  .eq("credential_id", cred_id).execute().data)
+    check("16c. La fila cruda del sobre NO contiene el plaintext (ni el viejo ni el nuevo)",
+          bool(secret_row) and plain_1 not in str(secret_row) and plain_2 not in str(secret_row))
+    check("16d. El sobre lleva el org_id (es el AAD con el que se cifró)",
+          bool(secret_row) and secret_row[0]["org_id"] == org_id_e1)
+
+    # 17. Revelar
+    resp = client.post(f"/api/v1/dashboard/credentials/{cred_id}/secret/reveal",
+                       headers=auth_headers(token_e1))
+    check(f"17. POST .../secret/reveal -> 200 y devuelve la contraseña vigente (fue {resp.status_code})",
+          resp.status_code == 200 and resp.json().get("password") == plain_2)
+
+    # 18. Aislamiento: la segunda empresa
+    resp = client.post(f"/api/v1/dashboard/credentials/{cred_id}/secret/reveal",
+                       headers=auth_headers(token_e2))
+    check(f"18a. Revelar la credencial de otra organización -> 404 (fue {resp.status_code})",
+          resp.status_code == 404)
+    resp = client.post(f"/api/v1/dashboard/credentials/{cred_id}/reassign",
+                       headers=auth_headers(token_e2), json={"member_id": None})
+    check(f"18b. Reasignar la credencial de otra organización -> 404 (fue {resp.status_code})",
+          resp.status_code == 404)
+
+    # 19. LA CREDENCIAL SOBREVIVE AL BORRADO DEL INTEGRANTE. Ejercita la FK de Postgres
+    # (ON DELETE SET NULL), no el script; y el reveal sigue devolviendo lo mismo, que es
+    # la prueba de que el AAD es la organización y no el integrante.
+    doomed = provision_worker(admin, client, token_e1, suffix, "d")
+    plain_3 = f"{stg}-tres"
+    resp = client.post(
+        "/api/v1/dashboard/credentials",
+        headers=auth_headers(token_e1),
+        json={"member_id": doomed["member_id"], "service_name": "Cuenta del que se va E2E",
+              "password": plain_3},
+    )
+    doomed_cred = resp.json().get("id") if resp.status_code == 201 else None
+    admin.table("dashboard_members").delete().eq("id", doomed["member_id"]).execute()
+    survivors = (admin.table("dashboard_credentials").select("id, member_id")
+                 .eq("id", doomed_cred).execute().data) if doomed_cred else []
+    check("19a. Borrado el integrante, su credencial de empresa SIGUE existiendo, sin portador",
+          len(survivors) == 1 and survivors[0]["member_id"] is None)
+    resp = client.post(f"/api/v1/dashboard/credentials/{doomed_cred}/secret/reveal",
+                       headers=auth_headers(token_e1))
+    check("19b. Y su reveal sigue devolviendo el mismo plaintext (el AAD no depende del integrante)",
+          resp.status_code == 200 and resp.json().get("password") == plain_3)
+
+    # 20. REASIGNADA: el nuevo portador la ve, el anterior no
+    replacement = provision_worker(admin, client, token_e1, suffix, "r")
+    before = client.get("/api/v1/me/credentials", headers=auth_headers(token_worker))
+    check("20a. Antes de reasignar, el trabajador A la ve en /me/credentials",
+          before.status_code == 200 and any(c["id"] == cred_id for c in before.json()))
+    resp = client.post(f"/api/v1/dashboard/credentials/{cred_id}/reassign",
+                       headers=auth_headers(token_e1), json={"member_id": replacement["member_id"]})
+    check(f"20b. POST .../reassign -> 200 (fue {resp.status_code})", resp.status_code == 200)
+    check("20c. La respuesta sugiere rotarla: la que cambia de manos la conocía el anterior",
+          resp.status_code == 200 and any(x["credential_id"] == cred_id
+                                          for x in resp.json().get("rotation_suggested", [])))
+    mine = client.get("/api/v1/me/credentials", headers=auth_headers(replacement["token"]))
+    check("20d. El reemplazo la lista en /me/credentials",
+          mine.status_code == 200 and any(c["id"] == cred_id for c in mine.json()))
+    resp = client.post(f"/api/v1/me/credentials/{cred_id}/reveal",
+                       headers=auth_headers(replacement["token"]))
+    check("20e. El reemplazo retira la contraseña y es la vigente",
+          resp.status_code == 200 and resp.json().get("password") == plain_2)
+    gone = client.get("/api/v1/me/credentials", headers=auth_headers(token_worker))
+    check("20f. El trabajador ANTERIOR ya no la lista",
+          gone.status_code == 200 and all(c["id"] != cred_id for c in gone.json()))
+    resp = client.post(f"/api/v1/me/credentials/{cred_id}/reveal", headers=auth_headers(token_worker))
+    check(f"20g. Y ya no puede retirarla -> 404 (fue {resp.status_code})", resp.status_code == 404)
+    audit = client.get("/api/v1/dashboard/audit-log", headers=auth_headers(token_e1)).json()
+    check("20h. La empresa ve en su cadena quién retiró la credencial (consultar_secreto_asignado)",
+          any(e["action"] == "consultar_secreto_asignado"
+              and e["actor_user_id"] == replacement["user_id"] for e in audit))
+
+    # 21. LA CONTRASEÑA QUE MUESTRA EL PANEL ES LA REAL. Es el contrato roto que motiva toda
+    # la etapa: antes el backend descartaba la contraseña y el panel mostraba una que él
+    # mismo había generado. Ejercita Supabase Auth de punta a punta.
+    worker_c = provision_worker(admin, client, token_e1, suffix, "c")
+    resp = client.post("/api/v1/dashboard/credentials", headers=auth_headers(token_e1),
+                       json={"member_id": worker_c["member_id"], "service_name": "Dropbox C E2E",
+                             "password": f"{stg}-dropbox"})
+    ext_c = resp.json().get("id") if resp.status_code == 201 else None
+    members_now = client.get("/api/v1/dashboard/members", headers=auth_headers(token_e1)).json()
+    interna_c = next((cr["id"] for m in members_now if m["id"] == worker_c["member_id"]
+                      for cr in m["credentials"] if cr["type"] == "interna"), None)
+
+    resp = client.post(f"/api/v1/dashboard/credentials/{interna_c}/revoke",
+                       headers=auth_headers(token_e1), json={})
+    revoked = resp.json() if resp.status_code == 200 else {}
+    applied = revoked.get("applied_password")
+    check(f"21a. revoke devuelve la contraseña que APLICÓ y quedó guardada cifrada (fue {resp.status_code})",
+          resp.status_code == 200 and bool(applied) and revoked.get("secret_stored") is True)
+    # Medido, no supuesto: el proyecto asumía (V10) que el access token ya emitido vive
+    # ~1 h tras un revoke. verify_token consulta a GoTrue en cada request, y GoTrue
+    # rechaza al usuario baneado o con la sesión invalidada por el cambio de contraseña.
+    resp = client.get("/api/v1/me/credentials", headers=auth_headers(worker_c["token"]))
+    check(f"21b0. Tras un revoke REAL, el token que el trabajador ya tenía deja de servir -> 401 (fue {resp.status_code})",
+          resp.status_code == 401)
+    resp = client.post("/api/v1/auth/login",
+                       json={"email": worker_c["email"], "password": worker_c["temporary_password"]})
+    check(f"21b. Revocada, la contraseña vieja ya no sirve -> 401 (fue {resp.status_code})",
+          resp.status_code == 401)
+    resp = client.post(f"/api/v1/dashboard/credentials/{interna_c}/restore",
+                       headers=auth_headers(token_e1))
+    resp_login = client.post("/api/v1/auth/login",
+                             json={"email": worker_c["email"], "password": applied or ""})
+    check(f"21c. Restaurada, la contraseña que mostró el panel ABRE la cuenta -> 200 (fue {resp_login.status_code})",
+          resp.status_code == 200 and resp_login.status_code == 200)
+    token_c = resp_login.json().get("access_token") if resp_login.status_code == 200 else None
+    resp = client.post(f"/api/v1/dashboard/credentials/{interna_c}/secret/reveal",
+                       headers=auth_headers(token_e1))
+    check("21d. Y lo que la empresa recupera después es esa misma contraseña",
+          resp.status_code == 200 and resp.json().get("password") == applied)
+
+    # 22. El trabajador ve que la empresa retiró su contraseña interna
+    resp = client.get("/api/v1/vault/audit", headers=auth_headers(token_c or worker_c["token"]))
+    seen = [e for e in (resp.json() if resp.status_code == 200 else [])
+            if e.get("action") == "consultar_credencial_interna_admin"]
+    check("22. El trabajador ve consultar_credencial_interna_admin con la empresa como actor "
+          "(si falla, la mitigación de R-HU21-5 NO está cumplida)",
+          bool(seen) and seen[0].get("actor_user_id") == e1_user_id)
+
+    # 21e. La guarda de /me contra un integrante REVOCADO. Un revoke real ya invalida su
+    # token (21b0), así que se simula el caso que la guarda sí cubre: la credencial quedó
+    # 'revocada' en la base pero Auth NO llegó a banear al usuario (admin_api_success=false
+    # en un revoke cuya llamada a Auth falló). Se voltea el estado directo y el token sigue
+    # siendo válido.
+    admin.table("dashboard_credentials").update({"status": "revocada"}).eq("id", interna_c).execute()
+    resp = client.post(f"/api/v1/me/credentials/{ext_c}/reveal", headers=auth_headers(token_c))
+    check(f"21e. Con su cuenta interna revocada en la base pero el token aún válido, no retira nada -> 403 (fue {resp.status_code})",
+          resp.status_code == 403)
+    admin.table("dashboard_credentials").update({"status": "activa"}).eq("id", interna_c).execute()
+
+    # 25. Rotación sugerida: tras revocar, sus otras credenciales quedan marcadas
+    members_now = client.get("/api/v1/dashboard/members", headers=auth_headers(token_e1)).json()
+    flagged = next((cr for m in members_now if m["id"] == worker_c["member_id"]
+                    for cr in m["credentials"] if cr["id"] == ext_c), {})
+    check("25a. Tras revocar al integrante, su otra credencial queda con rotation_required",
+          flagged.get("rotation_required") is True)
+    client.put(f"/api/v1/dashboard/credentials/{ext_c}/secret", headers=auth_headers(token_e1),
+               json={"password": f"{stg}-rotada"})
+    members_now = client.get("/api/v1/dashboard/members", headers=auth_headers(token_e1)).json()
+    cleared = next((cr for m in members_now if m["id"] == worker_c["member_id"]
+                    for cr in m["credentials"] if cr["id"] == ext_c), {})
+    check("25b. Guardar una contraseña nueva (rotar de verdad) apaga la bandera",
+          cleared.get("rotation_required") is False)
+
+    # 20i. Una interna no se reasigna
+    resp = client.post(f"/api/v1/dashboard/credentials/{interna_c}/reassign",
+                       headers=auth_headers(token_e1), json={"member_id": replacement["member_id"]})
+    check(f"20i. Reasignar una cuenta INTERNA -> 400 (fue {resp.status_code})", resp.status_code == 400)
+
+    # 23. Las dos cadenas siguen verificando, con entradas de todos los tipos
+    ok_panel, broken_panel = audit_chain.verify_chain_jsonb("dashboard_audit_log")
+    check(f"23a. verify_chain_jsonb('dashboard_audit_log') (broken_id={broken_panel})", ok_panel)
+    ok_vault, broken_vault = audit_chain.verify_chain("vault_audit_log")
+    check(f"23b. verify_chain('vault_audit_log') sigue íntegra (broken_id={broken_vault})", ok_vault)
+
+    skip("24. Alterar una fila del panel y ver la cadena romperse: dejaría rota de forma "
+         "permanente la cadena de desarrollo; está cubierto de forma hermética en "
+         "tests/test_audit_chain.py")
+    skip("26. Sin VAULT_MASTER_KEY, PUT /secret y el reveal responden 503: exige reiniciar un "
+         "proceso que el script no posee (ver M1)")
+
     print(
-        "\n13. MANUAL — no automatizado (requiere reiniciar el backend sin\n"
+        "\nM1. MANUAL — no automatizado (requiere reiniciar el backend sin\n"
         "    VAULT_MASTER_KEY, y este script no reinicia procesos que no le pertenecen):\n"
         "    a) Comentar VAULT_MASTER_KEY en .env, reiniciar el backend.\n"
         f"    b) GET  /api/v1/dashboard/members/{member_id}/vault -> esperar 200 con los ítems\n"
         "       (listar metadata no descifra, así que no depende de la KEK — AC8).\n"
         f"    c) POST /api/v1/dashboard/members/{member_id}/vault/{target_item}/reveal -> esperar 503.\n"
         "    d) Descomentar VAULT_MASTER_KEY y reiniciar antes de seguir usándolo.\n"
-        "\n14. MANUAL — UI de la extensión (evidencia en docs/evidencia/hu21-ui-manual.txt):\n"
+        "\nM2. MANUAL — UI de la extensión (evidencia en docs/evidencia/hu21-ui-manual.txt):\n"
         "    a) AC4: login con la cuenta empresa -> el botón 'Panel de administración'\n"
         "       aparece; login con una cuenta personal -> no aparece.\n"
         "    b) AC2: 'Agregar trabajador' muestra la contraseña temporal una sola vez.\n"

@@ -173,3 +173,105 @@ Limpieza (E2E_HU21_CLEANUP=1)...
 Limpieza terminada.
 
 19/19 pasos OK, 1 omitidos (no cuentan como PASS).
+
+============================================================================
+ETAPA C — credenciales propias de la organización — 2026-09-18
+============================================================================
+Esquema recreado con scripts/reset_hu21_schema.py, demo sembrada con
+scripts/seed_dashboard_demo.py. Corrida contra el backend y Supabase reales, con
+E2E_HU21_CLEANUP=1. Los pasos 19, 20 y 21 son los que deciden si la etapa está hecha.
+
+HALLAZGO MEDIDO (no supuesto): el proyecto asumía (V10, AC6 de HU16) que tras un revoke
+el access token ya emitido sigue válido ~1 hora. Sonda con un usuario desechable contra
+el backend real:
+  baseline (token vivo)              -> 200
+  tras SOLO banear                   -> 401
+  tras desbanear (mismo token)       -> 200
+  tras SOLO cambiar la contraseña    -> 401
+es decir, banear o cambiar la contraseña invalida el token de inmediato: verify_token
+consulta a GoTrue en cada request. La ventana de ~1 h no existe en esta ruta. Lo cubre
+el paso 21b0. La guarda de /me sigue siendo útil para el caso en que la llamada a Auth de
+un revoke falle (admin_api_success=false): la credencial queda "revocada" en la base con
+el usuario aún activo (paso 21e).
+
+Limitación honesta del paso 1 (igual que arriba): el registro público no se ejercita.
+
+HU21 E2E — 2026-09-18T23:25:18.286548+00:00
+Base URL: http://localhost:8000
+
+  AVISO: el endpoint público de registro falló (400 'email rate limit exceeded'). Dos causas observadas en este proyecto: Supabase rechaza el dominio de prueba @example.com como dirección inválida, y el rate limit de confirmación de mails del tier free (visto en HU17). Para ejercitar este camino de verdad hace falta una dirección con dominio entregable y cuota disponible. Acá se sigue por Admin API.
+SKIP  1. Registro de cuenta empresa por el endpoint público: NO ejercitado (cuenta provisionada por Admin API); type_account-en-el-token-del-sign_up queda verificado solo con mocks
+PASS  2a. POST /dashboard/members -> 201 (fue 201)
+PASS  2b. Devuelve una contraseña temporal
+PASS  2c. El integrante quedó con org_id y supabase_user_id
+PASS  3. Login del trabajador con la contraseña temporal -> 200 (fue 200)
+PASS  4. El trabajador guarda 2 credenciales en su bóveda
+PASS  5a. GET /members/{id}/vault -> 200 con 2 ítems (fue 200)
+PASS  5b. El listado no trae secretos ni criptograma
+PASS  6a. POST .../reveal -> 200 (fue 200)
+PASS  6b. El plaintext coincide con lo que guardó el trabajador
+PASS  7a. El trabajador ve la entrada consultar_admin en su propia auditoría
+PASS  7b. Esa entrada identifica a la empresa como actor (si falla, la mitigación de AC7 NO está cumplida)
+PASS  8a. El panel registra consultar_vault_miembro
+PASS  8b. Esa entrada lleva vault_item_id y credential_id en null
+PASS  9. verify_chain('vault_audit_log') con entradas mixtas (broken_id=None)
+PASS  10a. La segunda empresa no ve al trabajador de la primera
+PASS  10b. Listar la bóveda de un integrante ajeno -> 404 (fue 404)
+PASS  10c. Revelar un ítem ajeno -> 404 (fue 404)
+PASS  11. Cuenta personal en /dashboard/members -> 403 (fue 403)
+PASS  12. Integrante sin cuenta SparkGate -> 200 con lista vacía (fue 200)
+PASS  15a. POST /dashboard/credentials con contraseña -> 201 (fue 201)
+PASS  15b. La fila cruda de la credencial lleva org_id no nulo (la tenencia es de la fila)
+PASS  15c. La respuesta declara has_secret
+PASS  15d. La credencial sin asignar aparece en ?assigned=false y NO en el listado de un integrante
+PASS  16a. PUT /credentials/{id}/secret -> 200 (fue 200)
+PASS  16b. El PUT no devuelve el plaintext
+PASS  16c. La fila cruda del sobre NO contiene el plaintext (ni el viejo ni el nuevo)
+PASS  16d. El sobre lleva el org_id (es el AAD con el que se cifró)
+PASS  17. POST .../secret/reveal -> 200 y devuelve la contraseña vigente (fue 200)
+PASS  18a. Revelar la credencial de otra organización -> 404 (fue 404)
+PASS  18b. Reasignar la credencial de otra organización -> 404 (fue 404)
+PASS  19a. Borrado el integrante, su credencial de empresa SIGUE existiendo, sin portador
+PASS  19b. Y su reveal sigue devolviendo el mismo plaintext (el AAD no depende del integrante)
+PASS  20a. Antes de reasignar, el trabajador A la ve en /me/credentials
+PASS  20b. POST .../reassign -> 200 (fue 200)
+PASS  20c. La respuesta sugiere rotarla: la que cambia de manos la conocía el anterior
+PASS  20d. El reemplazo la lista en /me/credentials
+PASS  20e. El reemplazo retira la contraseña y es la vigente
+PASS  20f. El trabajador ANTERIOR ya no la lista
+PASS  20g. Y ya no puede retirarla -> 404 (fue 404)
+PASS  20h. La empresa ve en su cadena quién retiró la credencial (consultar_secreto_asignado)
+PASS  21a. revoke devuelve la contraseña que APLICÓ y quedó guardada cifrada (fue 200)
+PASS  21b0. Tras un revoke REAL, el token que el trabajador ya tenía deja de servir -> 401 (fue 401)
+PASS  21b. Revocada, la contraseña vieja ya no sirve -> 401 (fue 401)
+PASS  21c. Restaurada, la contraseña que mostró el panel ABRE la cuenta -> 200 (fue 200)
+PASS  21d. Y lo que la empresa recupera después es esa misma contraseña
+PASS  22. El trabajador ve consultar_credencial_interna_admin con la empresa como actor (si falla, la mitigación de R-HU21-5 NO está cumplida)
+PASS  21e. Con su cuenta interna revocada en la base pero el token aún válido, no retira nada -> 403 (fue 403)
+PASS  25a. Tras revocar al integrante, su otra credencial queda con rotation_required
+PASS  25b. Guardar una contraseña nueva (rotar de verdad) apaga la bandera
+PASS  20i. Reasignar una cuenta INTERNA -> 400 (fue 400)
+PASS  23a. verify_chain_jsonb('dashboard_audit_log') (broken_id=None)
+PASS  23b. verify_chain('vault_audit_log') sigue íntegra (broken_id=None)
+SKIP  24. Alterar una fila del panel y ver la cadena romperse: dejaría rota de forma permanente la cadena de desarrollo; está cubierto de forma hermética en tests/test_audit_chain.py
+SKIP  26. Sin VAULT_MASTER_KEY, PUT /secret y el reveal responden 503: exige reiniciar un proceso que el script no posee (ver M1)
+
+M1. MANUAL — no automatizado (requiere reiniciar el backend sin
+    VAULT_MASTER_KEY, y este script no reinicia procesos que no le pertenecen):
+    a) Comentar VAULT_MASTER_KEY en .env, reiniciar el backend.
+    b) GET  /api/v1/dashboard/members/562a7c8f-00ff-4ad2-b106-b99415fc43f9/vault -> esperar 200 con los ítems
+       (listar metadata no descifra, así que no depende de la KEK — AC8).
+    c) POST /api/v1/dashboard/members/562a7c8f-00ff-4ad2-b106-b99415fc43f9/vault/fd6cf661-5d2e-4003-8b1f-e3e69844fae1/reveal -> esperar 503.
+    d) Descomentar VAULT_MASTER_KEY y reiniciar antes de seguir usándolo.
+
+M2. MANUAL — UI de la extensión (evidencia en docs/evidencia/hu21-ui-manual.txt):
+    a) AC4: login con la cuenta empresa -> el botón 'Panel de administración'
+       aparece; login con una cuenta personal -> no aparece.
+    b) AC2: 'Agregar trabajador' muestra la contraseña temporal una sola vez.
+    c) AC6: 'Ver contraseña' sobre un ítem del trabajador abre el modal con el
+       aviso de que la consulta queda registrada en la auditoría que él ve.
+
+Limpieza (E2E_HU21_CLEANUP=1)...
+Limpieza terminada.
+
+52/52 pasos OK, 3 omitidos (no cuentan como PASS).
