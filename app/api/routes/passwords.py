@@ -11,10 +11,11 @@ from app.schemas.passwords import (
     PasswordGenerateRequest,
     PasswordGenerateResponse,
 )
-from app.services import hibp_client, ai_engine, random_generator
+from app.services import hibp_client, ai_engine
 from app.services.ai_engine import AI_EVALUATE_VERSION
 from app.services.cache import evaluate_cache
 from app.services.entropy import calculate as calc_entropy, meets_threshold
+from app.services.password_factory import generate_password_core
 
 logger = logging.getLogger("sparkgate.passwords")
 router = APIRouter(prefix="/api/v1/passwords", tags=["passwords"])
@@ -89,61 +90,3 @@ async def generate_password(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return await generate_password_core(request)
-
-
-async def generate_password_core(
-    request: PasswordGenerateRequest,
-) -> PasswordGenerateResponse:
-    """Core generation logic, reused by /passwords/generate and the dashboard
-    offboarding endpoints (which call it internally, not over HTTP)."""
-    if request.mode == "random":
-        password = random_generator.generate(
-            length=request.length,
-            use_upper=request.use_upper,
-            use_lower=request.use_lower,
-            use_digits=request.use_digits,
-            use_symbols=request.use_symbols,
-        )
-        entropy_bits = calc_entropy(password)
-        logger.info("Generate (random): length=%d, entropy=%.1f", request.length, entropy_bits)
-        return PasswordGenerateResponse(
-            generated_password=password,
-            explanation=f"Contraseña generada aleatoriamente con {request.length} caracteres. Entropía: {entropy_bits:.1f} bits.",
-            entropy_bits=entropy_bits,
-        )
-
-    for attempt in range(3):
-        try:
-            result = await ai_engine.generate_password(
-                length=request.length,
-                context=request.context,
-                complexity_level=request.complexity_level,
-                style=request.style,
-                word_count=request.word_count,
-                theme=request.theme,
-                personal_words=request.personal_words,
-            )
-        except Exception as e:
-            logger.error("AI generate failed: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="AI service unavailable. Please try again later.",
-            )
-
-        password = result["generated_password"]
-        entropy_bits = calc_entropy(password)
-        if entropy_bits >= 60.0:
-            break
-        logger.warning("Generate attempt %d below threshold: %.1f bits", attempt + 1, entropy_bits)
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Generated password does not meet minimum entropy threshold after multiple attempts.",
-        )
-
-    logger.info("Generate (ai): length=%d, entropy=%.1f, attempts=%d", request.length, entropy_bits, attempt + 1)
-    return PasswordGenerateResponse(
-        generated_password=password,
-        explanation=result["explanation"],
-        entropy_bits=entropy_bits,
-    )

@@ -19,6 +19,7 @@ from app.schemas.dashboard import (
     ReassignCredentialResponse,
     RotationSuggestion,
 )
+from app.schemas.passwords import PasswordGenerateRequest
 from app.schemas.vault import VaultItemOut, VaultSecretOut
 from app.services import (
     credential_secret_repo,
@@ -28,22 +29,38 @@ from app.services import (
     vault_repo,
 )
 from app.services.db_client import get_supabase_admin
+from app.services.password_factory import generate_password_core
 
 logger = logging.getLogger("sparkgate.dashboard")
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
 
-def _resolve_password(body: CredentialActionRequest) -> str:
-    """Server-side generation unless the admin explicitly overrides. The generated
-    value is used to rotate/propose a credential but is NEVER written to the audit
-    log (AC4)."""
+async def _resolve_password(body: CredentialActionRequest) -> str:
+    """Contraseña que la rotación va a aplicar (HU18: «genera una credencial nueva vía
+    /passwords/generate»), salvo que el admin la fije él. Nunca llega al log de auditoría.
+
+    Usa generate_password_core, la MISMA función que sirve POST /api/v1/passwords/generate:
+    no una copia paralela. (Su docstring ya afirmaba esta reutilización antes de que fuera
+    cierta: llamaba a random_generator directo.)
+
+    mode="random" A PROPÓSITO: es el único camino de esa función que no llama a la IA, y
+    por lo tanto el único que no puede terminar en un 502. Revocar a alguien que se va no
+    puede depender de que Ollama/OpenRouter estén arriba, y una contraseña de servicio
+    generada al azar es la que mejor entropía garantiza. Además calcula y registra la
+    entropía, que antes no se medía en la rotación.
+    """
     if body.new_password:
         return body.new_password
-    generated = random_generator.generate(
-        length=16, use_upper=True, use_lower=True, use_digits=True, use_symbols=True
+    generated = await generate_password_core(
+        PasswordGenerateRequest(
+            mode="random", length=16, use_upper=True, use_lower=True, use_digits=True, use_symbols=True
+        )
     )
-    logger.info("Dashboard generated a new credential password server-side.")
-    return generated
+    logger.info(
+        "Dashboard generó una contraseña de rotación en el servidor (entropía %.1f bits).",
+        generated.entropy_bits,
+    )
+    return generated.generated_password
 
 
 def _audit(caller: dict, *, member_id: str | None, action: str, **fields) -> None:
@@ -627,7 +644,7 @@ async def revoke_internal_credential(
     supabase_user_id = credential.get("supabase_user_id")
     if supabase_user_id:
         try:
-            new_password = _resolve_password(body)
+            new_password = await _resolve_password(body)
             get_supabase_admin().auth.admin.update_user_by_id(
                 supabase_user_id, {"password": new_password, "ban_duration": "87600h"}
             )
@@ -730,7 +747,7 @@ async def suggest_external_credential(
     # for manual application on the external service; SparkGate makes no promise to
     # change anything on the remote service. (Este comentario era falso hasta ahora:
     # el valor se descartaba y el caller solo veía el que él mismo había enviado.)
-    suggested_password = _resolve_password(body)
+    suggested_password = await _resolve_password(body)
     # Se guarda cifrada como la contraseña que la empresa va a aplicar en el servicio:
     # así no depende de que alguien la anote. Sigue pendiente hasta que se aplique.
     secret_stored = _try_store_secret(caller, credential, password=suggested_password)

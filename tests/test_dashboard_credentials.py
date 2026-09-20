@@ -16,10 +16,11 @@ from httpx import AsyncClient, ASGITransport
 
 from app.api import dependencies
 from app.api.dependencies import verify_token
-from app.api.routes import dashboard
+from app.api.routes import dashboard, passwords
 from app.core.config import settings
 from app.main import app
-from app.services import dashboard_repo, secret_access, vault_crypto
+from app.schemas.passwords import PasswordGenerateResponse
+from app.services import ai_engine, dashboard_repo, password_factory, secret_access, vault_crypto
 from tests.totp_fakes import enroll_real_factor, totp_env
 
 NOW = datetime.now(timezone.utc).isoformat()
@@ -1024,3 +1025,77 @@ async def test_las_guardas_responden_antes_de_pedir_el_segundo_factor(client, wo
         "sugerir una interna": 400, "aplicar a una externa": 400, "guardar en una inexistente": 404,
     }
     assert world.audit == []
+
+
+# --------------------------------------------------------------------------- «vía /passwords/generate»
+
+
+def test_la_rotacion_y_el_endpoint_de_generar_comparten_la_misma_funcion():
+    """HU18: «genera una credencial nueva vía /passwords/generate». Es LA MISMA función, no una
+    copia paralela; y vive en servicios, no en una ruta que otra ruta importa."""
+    assert (
+        dashboard.generate_password_core
+        is passwords.generate_password_core
+        is password_factory.generate_password_core
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, credential", [(REVOKE, "cred-int-1"), (SUGGEST, "cred-ext-1")])
+async def test_revocar_y_sugerir_generan_con_generate_password_core_en_modo_random(
+    client, world, monkeypatch, url, credential
+):
+    pedidos = []
+
+    async def espia(request):
+        pedidos.append(request)
+        return PasswordGenerateResponse(
+            generated_password="Espia#Generada99aA", explanation="x", entropy_bits=104.0
+        )
+
+    monkeypatch.setattr(dashboard, "generate_password_core", espia)
+
+    async with client as ac:
+        response = await ac.post(url, json={})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert (body.get("applied_password") or body.get("suggested_password")) == "Espia#Generada99aA"
+    assert len(pedidos) == 1
+    assert (pedidos[0].mode, pedidos[0].length) == ("random", 16)
+    assert all((pedidos[0].use_upper, pedidos[0].use_lower, pedidos[0].use_digits, pedidos[0].use_symbols))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [REVOKE, SUGGEST])
+async def test_la_rotacion_no_depende_de_que_la_ia_este_arriba(client, world, monkeypatch, url):
+    """Revocar a alguien que se va no puede terminar en un 502 porque Ollama esté caído:
+    mode='random' es el único camino de generate_password_core que no llama a la IA."""
+    async def ia_caida(**kwargs):
+        raise RuntimeError("Ollama caído")
+
+    monkeypatch.setattr(ai_engine, "generate_password", ia_caida)
+
+    async with client as ac:
+        response = await ac.post(url, json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body.get("applied_password") or body.get("suggested_password")) == 16
+
+
+@pytest.mark.asyncio
+async def test_la_contrasena_que_fija_el_admin_no_pasa_por_el_generador(client, world, monkeypatch):
+    llamadas = []
+
+    async def espia(request):
+        llamadas.append(request)
+        raise AssertionError("no debería generarse nada")
+
+    monkeypatch.setattr(dashboard, "generate_password_core", espia)
+
+    async with client as ac:
+        response = await ac.post(REVOKE, json={"new_password": "LaQueFijoElAdmin#1"})
+
+    assert response.status_code == 200 and response.json()["applied_password"] == "LaQueFijoElAdmin#1"
+    assert llamadas == []
