@@ -40,7 +40,12 @@ create table if not exists vault_audit_log (
     -- HU21 etapa C: la empresa retiró la contraseña vigente de la cuenta SparkGate
     -- del trabajador. user_id es el trabajador; item_id va nulo. Cambiar este CHECK no
     -- cambia el conjunto de columnas, así que no invalida la cadena.
-    'consultar_credencial_interna_admin'
+    'consultar_credencial_interna_admin',
+    -- HU18: ciclo de vida del segundo factor. Vive acá y no en dashboard_audit_log porque
+    -- el enrolamiento es de la PERSONA: una cuenta personal no tiene org_id, y esa tabla
+    -- filtra por él. Además el propio usuario lo ve en GET /api/v1/vault/audit. Cambiar
+    -- este CHECK no cambia el conjunto de columnas, así que no invalida la cadena.
+    'mfa_enrolar', 'mfa_activar', 'mfa_desactivar', 'mfa_denegado'
   )),
   result text not null default 'ok' check (result in ('ok', 'denegado', 'error')),
   deleted_count int,

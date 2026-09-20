@@ -123,7 +123,11 @@ create table if not exists dashboard_audit_log (
     -- HU21 etapa C: credenciales propias de la organización.
     'crear_credencial_externa', 'reasignar_credencial',
     'guardar_secreto', 'guardar_secreto_fallido',
-    'consultar_secreto', 'consultar_secreto_denegado', 'consultar_secreto_asignado'
+    'consultar_secreto', 'consultar_secreto_denegado', 'consultar_secreto_asignado',
+    -- HU18: las tres escrituras sensibles ahora pueden ser DENEGADAS por el segundo
+    -- factor. El motivo concreto (totp_invalido | totp_no_enrolado | ...) viaja en
+    -- payload->>'denied_reason'. Ver sql/mfa_schema.sql para aplicarlo en un entorno vivo.
+    'revocar_interna_denegado', 'sugerir_externa_denegado', 'guardar_secreto_denegado'
   ))
 );
 
