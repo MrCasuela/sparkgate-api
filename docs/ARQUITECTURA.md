@@ -151,6 +151,7 @@ flowchart TB
 | Passwords | `app/api/routes/passwords.py` | Evaluar (3 dimensiones) y generar (AI/random) |
 | Dashboard | `app/api/routes/dashboard.py` | Offboarding SP-1: members, audit-log, revoke/suggest/restore |
 | Vault | `app/api/routes/vault.py` | HU17: guardar/listar/consultar/eliminar credencial propia cifrada |
+| MFA | `app/api/routes/mfa.py` | HU18: enrolar / confirmar / desactivar el segundo factor TOTP (`/me/mfa`, `require_user`) |
 | Health | `app/api/routes/health.py` | Estado de Ollama (raíz) + sesión Supabase |
 | `ai_engine` | `app/services/ai_engine.py` | Prompts + llamada LLM + parseo JSON (Ollama/OpenRouter) |
 | `hibp_client` | `app/services/hibp_client.py` | SHA-1 truncado + consulta `/range/{prefix}` (caché por prefijo, TTL 24h) |
@@ -159,11 +160,15 @@ flowchart TB
 | `random_generator` | `app/services/random_generator.py` | Generación criptográfica (`secrets`) |
 | `dashboard_repo` | `app/services/dashboard_repo.py` | CRUD sobre tablas del dashboard |
 | `vault_repo` | `app/services/vault_repo.py` | CRUD sobre `vault_items` / `vault_audit_log`, siempre filtrado por `user_id` |
-| `vault_crypto` | `app/services/vault_crypto.py` | Envelope encryption AES-256-GCM (DEK por ítem, KEK en `.env`), AAD=`user_id` |
+| `vault_crypto` | `app/services/vault_crypto.py` | Envelope encryption AES-256-GCM (DEK por ítem, KEK en `.env`), AAD=`user_id`. Acepta una clave alternativa (`key_b64`): el factor TOTP se sella con `TOTP_MASTER_KEY`, no con la KEK |
+| `totp_service` | `app/services/totp_service.py` | HU18: segundo factor RFC 6238 — enrolar, confirmar, verificar (ventana ±1 paso, anti-replay, bloqueo), desactivar |
+| `totp_repo` | `app/services/totp_repo.py` | `user_totp_factors`; `mark_used`/`confirm_factor` son UPDATE condicionales (anti-replay atómico) |
+| `secret_access` | `app/services/secret_access.py` | Punto de paso único: `read_foreign_secret` (lecturas) y `require_step_up` (escrituras sensibles) entran por el mismo `_verify_step_up` |
+| `password_factory` | `app/services/password_factory.py` | `generate_password_core`, compartida por `/passwords/generate` y la rotación del panel |
 | `audit_chain` | `app/services/audit_chain.py` | Registro encadenado por hash SHA-256 (base de HU19) |
 | `db_client` | `app/services/db_client.py` | Clientes Supabase perezosos: anon y service_role |
 | Config | `app/core/config.py` | `Settings` desde `.env` |
-| Excepciones | `app/core/exceptions.py` | Tipos 502/503 + handlers JSON |
+| Excepciones | `app/core/exceptions.py` | Tipos 502/503 + `StepUpRequired` (403 con `code` de primer nivel) + handlers JSON |
 
 ### 4.2 Contrato de error
 
@@ -328,6 +333,8 @@ erDiagram
   concurrentes sobre la misma cola fallan la segunda en vez de bifurcar la
   cadena en silencio.
 - Índices: `vault_items(user_id)` y `vault_audit_log(user_id)`.
+- `user_totp_factors` (HU18): una fila por persona. El sobre cifrado del secreto TOTP viaja ENTERO en la columna jsonb `secret_envelope` (sellado con `TOTP_MASTER_KEY`, AAD = ese mismo `user_id`), así que ningún módulo nuevo nombra las columnas del criptograma de la bóveda. `confirmed_at` nulo = enrolamiento a medias, que NO habilita nada. `last_time_step` es el contador anti-replay; `failed_attempts`/`locked_until`, el freno de fuerza bruta. RLS deny-all como las demás. Se aplica con `sql/mfa_schema.sql` (aditivo: solo cambian CHECKs de las dos tablas de auditoría, no columnas, así que ninguna cadena se invalida).
+- El ciclo de vida del factor (`mfa_enrolar`/`activar`/`desactivar`/`denegado`) se audita en `vault_audit_log` y no en `dashboard_audit_log`: es de la persona, una cuenta personal no tiene `org_id`, y además el propio usuario lo ve en `GET /vault/audit`. El motivo de una denegación del panel (`denied_reason`, siempre un enum) va en el payload jsonb.
 
 ## 6. Flujos clave
 
@@ -444,6 +451,45 @@ Logout revoca la sesión del **propio** token presentado (scope global). No es
 posible revocar la sesión de otro usuario desde aquí: el offboarding de quien se va
 se hace por el panel (ban + rotación de contraseña).
 
+### 6.5 Segundo factor — enrolar y verificar (HU18)
+
+```mermaid
+sequenceDiagram
+    participant U as Usuario (admin o trabajador)
+    participant M as mfa.py
+    participant R as ruta sensible
+    participant SA as secret_access
+    participant T as totp_service
+    participant DB as user_totp_factors
+
+    U->>M: POST /me/mfa/enroll
+    M->>T: start_enrollment
+    T->>DB: secreto sellado (TOTP_MASTER_KEY, AAD=user_id), confirmed_at = NULL
+    M-->>U: secret + otpauth:// (única respuesta que lo lleva)
+    Note over U: escanea el QR con Google Authenticator
+    U->>M: POST /me/mfa/confirm  [X-SparkGate-TOTP]
+    M->>T: confirm_enrollment
+    T->>DB: confirmed_at = now(), last_time_step
+
+    U->>R: revoke / suggest / PUT secret / reveal  [X-SparkGate-TOTP]
+    R->>R: guardas (404, tipo, estado): un 400 no quema un código
+    R->>SA: require_step_up / read_foreign_secret
+    SA->>T: verify(caller.id, code)
+    T->>DB: get_factor
+    alt no enrolado / inválido / reutilizado / bloqueado
+        T-->>SA: TotpDenied(code)
+        SA-->>R: StepUpRequired(code) + on_denied(code)
+        R-->>U: 403 {detail, code} y entrada *_denegado con denied_reason
+    else código vigente
+        T->>DB: mark_used(paso) — UPDATE condicional
+        SA-->>R: sigue: descifrar / rotar / banear
+    end
+```
+
+El código viaja en el header, no en el body ni en la URL. Un código aceptado no se puede reusar (RFC 6238 §5.2): dos
+peticiones simultáneas con el mismo código leen el mismo `last_time_step`, pero solo una gana el UPDATE condicional.
+Consecuencia de producto, no un defecto: **una operación sensible por cada paso de 30 s**.
+
 ## 7. Invariantes de seguridad (aplicados en código)
 
 | Invariante | Dónde | Evidencia |
@@ -463,7 +509,14 @@ se hace por el panel (ban + rotación de contraseña).
 | Fallo de integridad visible, no silencioso | `vault.py`, `dashboard.py` | `InvalidTag` → 503 + auditoría `result="error"`; nunca 404 (escondería la adulteración) ni 500 |
 | Aislamiento entre organizaciones | `dashboard_repo.py`, `dependencies.py` | `.eq("org_id", ...)` en cada consulta; el `org_id` lo resuelve `require_enterprise` contra la tabla `organizations`, nunca desde el claim del token (HU21 AC3) |
 | El claim de tenencia solo puede negar | `dependencies.py` | `user_metadata.org_id` se aplana como `claimed_org_id`; la clave `org_id` que leen los handlers la escribe únicamente el guard tras consultar la tabla |
-| Toda lectura de un secreto ajeno pasa por un único punto | `secret_access.py` | `read_foreign_secret`: KEK → segundo factor (HU18, hoy no-op) → descifrado. Un test escanea `app/api/routes/` y falla si otra ruta descifra |
+| Toda lectura de un secreto ajeno pasa por un único punto | `secret_access.py` | `read_foreign_secret`: KEK → segundo factor TOTP (RFC 6238, anti-replay) → descifrado. Tests herméticos: ninguna ruta descifra por su cuenta, y `totp_service.verify` y `_verify_step_up` solo aparecen en `secret_access.py` |
+| Toda ESCRITURA sensible pasa por el mismo verificador | `secret_access.py`, `dashboard.py` | `require_step_up` en revoke, suggest y `PUT /secret`: después de las guardas y antes de cualquier efecto, así un 400 no quema un código y un rechazo no deja la cuenta a medio rotar |
+| Un rechazo del segundo factor no accede, no cambia nada y deja rastro | `dashboard.py`, `me.py` | HU18 AC4. `*_denegado` con `denied_reason` (siempre un enum: el repositorio lo exige); E2E pasos 1-3, 16, 19, 25, 27 |
+| Un factor sin confirmar no habilita nada | `totp_service.py` | `confirmed_at` nulo ⇒ `totp_no_enrolado`. Sin esto, abandonar el enrolamiento dejaría a la persona sin salida (E2E paso 7) |
+| Un código no se reusa | `totp_service.py`, `totp_repo.py` | dos capas: chequeo `<= last_time_step` y UPDATE condicional. Cada capa tiene su propio test: la segunda tapaba a la primera (E2E paso 13) |
+| El factor no depende de la KEK de la bóveda | `vault_crypto.py`, `totp_service.py` | sellado con `TOTP_MASTER_KEY`. Por eso «revocar a alguien no depende de la KEK» sigue siendo cierto con el segundo factor puesto. Sin `TOTP_MASTER_KEY`: 503, nunca se omite el factor |
+| Ningún secreto TOTP ni código llega a un log ni a una auditoría | `totp_service.py`, `mfa.py`, `dashboard_repo.py` | probado por recorrido con la cadena real y por mutación; E2E paso 34 |
+| Una sesión revocada deja de servir en la petición siguiente | `dependencies.py` (`verify_token`) | **MEDIDO contra Supabase real**: `hu18-e2e.txt` pasos 22-24 y `hu21-e2e.txt` 21b0. Access token → 401; login con la contraseña vieja y la nueva → `user_banned`; refresh token previo → `refresh_token_not_found`. **Depende de que `verify_token` consulte a Auth en CADA request y no valide el JWT localmente: si alguien pasa a validación local, esta fila deja de ser cierta y hay que rehacer la medición.** La limitación de JWT (un token puede seguir válido hasta su `exp`, ~1 h) existe para un tercero que lo valide por su cuenta, y queda documentada, no oculta |
 | El criptograma solo lo nombran dos módulos | `credential_secret_repo.py`, `vault_crypto.py` | test hermético sobre el código fuente; los listados usan columnas explícitas, nunca `select("*")` |
 | La credencial es de la organización y sobrevive al integrante | `sql/dashboard_schema.sql` | `member_id` nullable + `ON DELETE SET NULL`; el secreto no depende de `supabase_user_id` |
 | El log de la organización es una cadena verificable | `audit_chain.py` | payload jsonb hasheado; `actor_email` fuera del hash; `append_entry` reintenta ante colisión de `prev_hash` |
@@ -536,18 +589,22 @@ flowchart LR
 | GET | `/api/v1/dashboard/members` | empresa | `dashboard_repo` | miembros + credenciales de **su** organización |
 | POST | `/api/v1/dashboard/members` | empresa | `dashboard_repo` + Admin API | alta de trabajador; devuelve la contraseña temporal una sola vez (HU21 AC2) |
 | GET | `/api/v1/dashboard/audit-log` | empresa | `dashboard_repo` | `created_at desc`, filtrado por `org_id` |
-| POST | `/api/v1/dashboard/credentials/{id}/revoke` | empresa | `dashboard_repo` + Admin API | interna |
-| POST | `/api/v1/dashboard/credentials/{id}/suggest` | empresa | `dashboard_repo` | externa |
+| POST | `/api/v1/dashboard/credentials/{id}/revoke` | empresa + **TOTP** | `secret_access` + `dashboard_repo` + Admin API | interna (HU18 AC2): rota la contraseña y banea en UNA llamada a `update_user_by_id`; `sign_out` no sirve (revoca por el JWT de la sesión, que el admin no tiene) |
+| POST | `/api/v1/dashboard/credentials/{id}/suggest` | empresa + **TOTP** | `secret_access` + `dashboard_repo` | externa (HU18 AC3): queda `pendiente_aplicacion_manual`. `admin_api_success=true` significa «el backend hizo lo suyo», NO «el proveedor cambió la contraseña» |
 | POST | `/api/v1/dashboard/credentials/{id}/restore` | empresa | `dashboard_repo` + Admin API | interna/externa |
 | GET | `/api/v1/dashboard/members/{id}/vault` | empresa | `dashboard_repo` + `vault_repo` | metadata del trabajador, no descifra; sin cuenta vinculada → `[]` (HU21 AC5) |
-| POST | `/api/v1/dashboard/members/{id}/vault/{item}/reveal` | empresa | `vault_repo` + `vault_crypto` | descifra con el AAD del **dueño**; doble auditoría (HU21 AC6/AC7) |
+| POST | `/api/v1/dashboard/members/{id}/vault/{item}/reveal` | empresa + **TOTP** | `secret_access` | descifra con el AAD del **dueño**; doble auditoría (HU21 AC6/AC7) |
 | GET | `/api/v1/dashboard/credentials` | empresa | `dashboard_repo` | `?assigned=false` = pool sin asignar (etapa C) |
 | POST | `/api/v1/dashboard/credentials` | empresa | `dashboard_repo` + `secret_access` | registra una cuenta externa; contraseña opcional, cifrada con AAD = org |
-| PUT | `/api/v1/dashboard/credentials/{id}/secret` | empresa | `secret_access` + `credential_secret_repo` | guarda/reemplaza; nunca devuelve el plaintext; `apply_to_account` (interna) va primero a Auth |
-| POST | `/api/v1/dashboard/credentials/{id}/secret/reveal` | empresa | `secret_access` | POST a propósito; interna ⇒ además entrada en la auditoría del trabajador |
+| PUT | `/api/v1/dashboard/credentials/{id}/secret` | empresa + **TOTP** | `secret_access` + `credential_secret_repo` | guarda/reemplaza; nunca devuelve el plaintext; `apply_to_account` (interna) va primero a Auth |
+| POST | `/api/v1/dashboard/credentials/{id}/secret/reveal` | empresa + **TOTP** | `secret_access` | POST a propósito; interna ⇒ además entrada en la auditoría del trabajador |
 | POST | `/api/v1/dashboard/credentials/{id}/reassign` | empresa | `dashboard_repo` | solo externas; no re-cifra; sugiere rotar la que cambia de manos |
 | GET | `/api/v1/me/credentials` | usuario | `dashboard_repo` | lo que la empresa le asignó al trabajador (router propio, `require_user`) |
-| POST | `/api/v1/me/credentials/{id}/reveal` | usuario | `secret_access` | el trabajador retira su credencial; 403 si su cuenta interna está revocada |
+| POST | `/api/v1/me/credentials/{id}/reveal` | usuario + **TOTP** | `secret_access` | el trabajador retira su credencial; también exige el factor (el secreto es de la ORGANIZACIÓN); 403 si su cuenta interna está revocada |
+| GET | `/api/v1/me/mfa` | usuario | `totp_service` | estado del factor; nunca el secreto |
+| POST | `/api/v1/me/mfa/enroll` | usuario | `totp_service` | 201; única respuesta con el secreto (`otpauth_uri` para el QR, dibujado por el cliente); 409 si ya hay uno confirmado; 503 sin `TOTP_MASTER_KEY` |
+| POST | `/api/v1/me/mfa/confirm` | usuario + código | `totp_service` | el primer código correcto activa el factor |
+| DELETE | `/api/v1/me/mfa` | usuario + código | `totp_service` | exige un código vigente: un JWT robado no puede apagar el factor |
 | POST | `/api/v1/vault/items` | usuario | `vault_crypto` + `vault_repo` | 503 si falta la KEK (AC5) |
 | GET | `/api/v1/vault/items` | usuario | `vault_repo` | metadatos, nunca descifra |
 | GET | `/api/v1/vault/items/{id}` | usuario | `vault_repo` + `vault_crypto` | 404 si no es del dueño (AC3) |

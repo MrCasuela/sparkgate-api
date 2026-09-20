@@ -60,11 +60,14 @@ async def reveal_my_credential(
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
 
-    # Guardas de estado. No son cosméticas: revocar a un trabajador banea sus logins
-    # futuros, pero su access token ya emitido sigue vivo ~1 hora (V10). Sin esto, un
-    # trabajador recién revocado podría retirar todas las credenciales de la empresa
-    # durante esa hora. Se mira el estado de SU cuenta interna, no el de la credencial
-    # externa: la externa sigue "activa" aunque él ya no pertenezca a la empresa.
+    # Guardas de estado. Revocar a un trabajador banea su cuenta y su access token ya
+    # emitido deja de servir en la petición siguiente (verify_token consulta a Auth en
+    # cada request; medido contra Supabase real: E2E de HU21 paso 21b0 y de HU18 paso 22).
+    # Esta guarda cubre OTRO caso: que la llamada a Auth del revoke falle
+    # (admin_api_success=false), donde la credencial queda "revocada" en la base con el
+    # usuario todavía activo (E2E de HU21 paso 21e). Se mira el estado de SU cuenta
+    # interna, no el de la credencial externa: la externa sigue "activa" aunque él ya no
+    # pertenezca a la empresa.
     if dashboard_repo.has_revoked_internal(credential["member_id"]):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

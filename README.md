@@ -80,23 +80,52 @@ datos y flujos en [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
 | GET | /api/v1/dashboard/members | List members + credentials of the caller's org (enterprise) |
 | POST | /api/v1/dashboard/members | Provision a worker account, returns a one-time temporary password (enterprise) |
 | GET | /api/v1/dashboard/audit-log | Audit log of the caller's org (enterprise) |
-| POST | /api/v1/dashboard/credentials/{id}/revoke | Revoke internal credential (enterprise) |
-| POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest external credential password (enterprise) |
+| POST | /api/v1/dashboard/credentials/{id}/revoke | Rotate an internal account's password and ban it: blocks logins and refresh tokens at once (enterprise, **TOTP**) |
+| POST | /api/v1/dashboard/credentials/{id}/suggest | Suggest an external credential password, left "pending manual application" — never claims the provider changed (enterprise, **TOTP**) |
 | POST | /api/v1/dashboard/credentials/{id}/restore | Restore credential (enterprise) |
 | GET | /api/v1/dashboard/members/{id}/vault | Worker's vault metadata, never decrypts (enterprise) |
-| POST | /api/v1/dashboard/members/{id}/vault/{item}/reveal | Decrypt a worker's credential; writes to both audit logs (enterprise) |
+| POST | /api/v1/dashboard/members/{id}/vault/{item}/reveal | Decrypt a worker's credential; writes to both audit logs (enterprise, **TOTP**) |
 | GET/POST | /api/v1/dashboard/credentials | List (`?assigned=false` = unassigned pool) / register an external account (enterprise) |
-| PUT | /api/v1/dashboard/credentials/{id}/secret | Store or replace the organization's password for an account; never echoes it (enterprise) |
-| POST | /api/v1/dashboard/credentials/{id}/secret/reveal | Decrypt an organization credential (enterprise) |
+| PUT | /api/v1/dashboard/credentials/{id}/secret | Store or replace the organization's password for an account; never echoes it (enterprise, **TOTP**) |
+| POST | /api/v1/dashboard/credentials/{id}/secret/reveal | Decrypt an organization credential (enterprise, **TOTP**) |
 | POST | /api/v1/dashboard/credentials/{id}/reassign | Hand an external account to the replacement, or back to the pool (enterprise) |
 | GET | /api/v1/me/credentials | What the organization assigned to the logged-in worker (any user) |
-| POST | /api/v1/me/credentials/{id}/reveal | The worker retrieves an assigned credential (any user) |
+| POST | /api/v1/me/credentials/{id}/reveal | The worker retrieves an assigned credential (any user, **TOTP**) |
+| GET | /api/v1/me/mfa | Second-factor status; never the secret (any user) |
+| POST | /api/v1/me/mfa/enroll | Start TOTP enrollment: returns the secret + `otpauth://` URI once; pending until confirmed (any user) |
+| POST | /api/v1/me/mfa/confirm | Activate the factor with the first code, in `X-SparkGate-TOTP` (any user) |
+| DELETE | /api/v1/me/mfa | Deactivate the factor; needs a valid code in `X-SparkGate-TOTP` (any user) |
 | POST | /api/v1/vault/items | Save an encrypted credential (HU17 AC1/AC2) |
 | GET | /api/v1/vault/items | List own credentials (metadata only, never decrypted) |
 | GET | /api/v1/vault/items/{id} | Decrypt and return own credential (HU17 AC3) |
 | DELETE | /api/v1/vault/items/{id} | Delete one credential (Ley 21.719, works without the master key) |
 | DELETE | /api/v1/vault/items | Purge all own credentials (Ley 21.719) |
 | GET | /api/v1/vault/audit | Own vault audit trail (HU19 hash chain) |
+
+### Second factor (HU18)
+
+Reading or rotating a secret that is **not yours** needs a valid TOTP code (RFC 6238: the same
+6-digit code Google Authenticator / Authy shows), sent in the `X-SparkGate-TOTP` header. The rows
+marked **TOTP** above are the six operations that require it. That includes the worker retrieving
+a credential the organization assigned to them: that secret belongs to the organization.
+
+A rejected request never touches the credential, changes nothing, and is written to the audit log
+with its reason. The `403` carries a top-level `code` so a client can tell "enroll first" from
+"ask for the code again":
+
+| `code` | Meaning |
+|---|---|
+| `totp_no_enrolado` | The account has no active factor (a factor still pending confirmation counts as none) |
+| `totp_invalido` | Code missing, malformed, wrong or expired |
+| `totp_reutilizado` | A valid code that was already used (anti-replay: one operation per 30 s step) |
+| `totp_bloqueado` | 5 wrong codes in a row: locked for 15 minutes, even for a correct code |
+
+If the second factor cannot be verified (`TOTP_MASTER_KEY` missing) the answer is `503`, never a
+pass. `TOTP_MASTER_KEY` is a key of its own, separate from `VAULT_MASTER_KEY` on purpose: revoking a
+departed member must keep working with the vault key down. See `.env.example`.
+
+Enroll the demo owner with `python scripts/seed_hu18_factor.py`; apply the schema with
+`python scripts/apply_mfa_schema.py`. Real end-to-end evidence: `docs/evidencia/hu18-e2e.txt`.
 
 ### Generate modes
 
