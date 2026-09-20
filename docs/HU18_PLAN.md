@@ -1,6 +1,6 @@
 # HU18 — Acceso administrativo con verificación TOTP
 
-> **Estado:** implementada en el backend y verificada contra Supabase real (35/35 pasos sustantivos, 6 omitidos, ver §6 y `docs/evidencia/hu18-e2e.txt`). Pendiente: la UI de la extensión y tres pasos manuales.
+> **Estado:** implementada en el backend y verificada contra Supabase real (35/35 pasos sustantivos, 6 omitidos, ver §6 y `docs/evidencia/hu18-e2e.txt`). La UI de la extensión se hizo después (ver el anexo §9); pendientes: verla en un Chrome real y tres pasos manuales.
 > **Fecha de diseño:** 2026-09-19. **Política:** las correcciones que impuso el código NO se funden en el diseño; van en el §8, con lo que decía el plan y lo que dijo el código.
 > **Referencia:** CU08 — Consultar o rotar credencial de un integrante (Informe, Casos de Uso). Cierra R-HU21-1 y R-HU21-7.
 
@@ -154,3 +154,23 @@ Lo que decía el plan aprobado, lo que dijo el código y cómo se resolvió.
 | C11 | `admin_api_success` en `suggest` | Vale `true` para una externa donde **no se llama a Auth** | No se renombra (rompería la extensión); el docstring y `ARQUITECTURA.md` §9 lo dicen |
 
 **Un primer intento de E2E** cayó por un bug del propio script (una lista de módulo tratada como variable local) antes de tocar nada. No cuenta como corrida.
+
+---
+
+## 9. Actualización 2026-09-20 — la extensión (nota de trazabilidad; el texto de arriba no se reescribe)
+
+La UI se hizo en el repo `sparkgate-extension` (7 commits sobre `develop`, rama `SCRUM-28-hu18-...`, sin push). El bullet
+«No cubre la extensión» del §7 describía el estado del backend solo; ya no es cierto para el conjunto.
+
+- Las seis operaciones piden el código y muestran el motivo; el enrolamiento (QR, activar, desactivar) está en el panel y
+  en la bóveda del trabajador; la auditoría etiqueta los intentos rechazados. **El código es un parámetro obligatorio de
+  la firma de cada función de la API**: si el backend gatea otra operación, TypeScript marca cada llamador.
+- **Contrato verificado contra este backend real desde el cliente real de la extensión: 13/13** (`sparkgate-extension/docs/evidencia/hu18-contrato-real.txt`),
+  con la comprobación demostrada capaz de fallar. Confirma AC5 desde el cliente: tras revocar, el access token del
+  trabajador responde 401.
+- Decisiones de esta capa: `sparkgate-extension/SPEC.md` (I.step-up, V23-V29) y la bóveda (ADR 2026-09-20).
+- **Sigue sin verse** la interfaz en un Chrome real, ni que una app de autenticación real lea el QR (M3). Los tests de la
+  extensión son de jsdom: prueban comportamiento, no aspecto.
+- Corrige una predicción del SPEC de la extensión (V19: «un header a tres llamadas y nada más cambia»): eran seis
+  llamadas y hicieron falta pantallas nuevas.
+
