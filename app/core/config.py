@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = "meta-llama/llama-3.1-8b-instruct"
     vault_master_key: str = ""
+    totp_master_key: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

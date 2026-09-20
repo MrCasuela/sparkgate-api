@@ -71,3 +71,44 @@ def test_encrypt_raises_without_kek(monkeypatch):
     monkeypatch.setattr(settings, "vault_master_key", "")
     with pytest.raises(RuntimeError):
         vault_crypto.encrypt_secret({"password": "x", "notes": None}, aad="user-1")
+
+
+# --------------------------------------------------------------------------
+# Clave alternativa (HU18): el factor TOTP se sella con TOTP_MASTER_KEY, no con la KEK
+# --------------------------------------------------------------------------
+
+
+def test_una_clave_explicita_reemplaza_a_la_kek_no_se_suma_a_ella():
+    """Sellado con la clave del factor, la KEK de la bóveda NO lo abre y viceversa. Si las
+    dos fueran intercambiables, perder una arrastraría a la otra, que es justo lo que se
+    evita con dos claves."""
+    payload = {"totp_secret": "JBSWY3DPEHPK3PXP"}
+    sealed = vault_crypto.encrypt_secret(payload, aad="user-1", key_b64=OTHER_KEK)
+
+    assert vault_crypto.decrypt_secret(sealed, aad="user-1", key_b64=OTHER_KEK) == payload
+    with pytest.raises(InvalidTag):
+        vault_crypto.decrypt_secret(sealed, aad="user-1")  # con la KEK de la bóveda
+
+
+def test_la_clave_explicita_no_depende_de_que_la_kek_este_arriba(monkeypatch):
+    """La propiedad que motivó tener dos claves: con la KEK caída, el factor sigue
+    sellándose y abriéndose."""
+    monkeypatch.setattr(settings, "vault_master_key", "")
+    sealed = vault_crypto.encrypt_secret({"totp_secret": "X"}, aad="user-1", key_b64=OTHER_KEK)
+    assert vault_crypto.decrypt_secret(sealed, aad="user-1", key_b64=OTHER_KEK) == {"totp_secret": "X"}
+    assert vault_crypto.is_available() is False
+    assert vault_crypto.is_available(OTHER_KEK) is True
+
+
+def test_una_clave_explicita_vacia_no_cae_a_la_kek():
+    """"" no es None: una TOTP_MASTER_KEY sin configurar debe leerse como NO disponible, no
+    como «cifrá el segundo factor con la clave de la bóveda» (que anularía la separación)."""
+    assert vault_crypto.is_available("") is False
+    with pytest.raises(RuntimeError):
+        vault_crypto.encrypt_secret({"totp_secret": "X"}, aad="user-1", key_b64="")
+
+
+def test_el_aad_tambien_ata_al_sobre_del_factor():
+    sealed = vault_crypto.encrypt_secret({"totp_secret": "X"}, aad="user-1", key_b64=OTHER_KEK)
+    with pytest.raises(InvalidTag):
+        vault_crypto.decrypt_secret(sealed, aad="user-2", key_b64=OTHER_KEK)

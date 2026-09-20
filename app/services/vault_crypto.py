@@ -15,6 +15,12 @@ Not zero-knowledge by design (informe L413): the KEK is held by the backend, so
 an operator with server access can decrypt. This lets an admin role recover or
 rotate a departed member's credential later (CU08), which a strict
 zero-knowledge scheme would forbid.
+
+The same envelope scheme also protects the TOTP factor (HU18), but under its OWN key
+(`settings.totp_master_key`), passed as `key_b64`. Two keys on purpose: with a single one,
+losing the KEK would also stop the second factor from being verified, and revoking a
+departed member (which must not depend on the KEK) would die with it. One implementation
+of GCM/AAD/envelope; the second key is a parameter, not a second crypto module.
 """
 
 import base64
@@ -39,8 +45,7 @@ def _b64d(data: str) -> bytes:
     return base64.urlsafe_b64decode(data.encode("ascii"))
 
 
-def _load_kek() -> bytes | None:
-    raw = settings.vault_master_key
+def _load_key(raw: str | None) -> bytes | None:
     if not raw:
         return None
     try:
@@ -52,19 +57,26 @@ def _load_kek() -> bytes | None:
     return key
 
 
-def is_available() -> bool:
-    """True only if a well-formed 32-byte KEK is configured (AC5)."""
-    return _load_kek() is not None
+def _resolve_key(key_b64: str | None) -> bytes | None:
+    """`None` = the vault KEK. Any other value, even "", is an explicit key and is NEVER
+    silently replaced by the KEK: an unset TOTP key must read as unavailable, not as
+    "encrypt the second factor under the vault key"."""
+    return _load_key(settings.vault_master_key if key_b64 is None else key_b64)
 
 
-def encrypt_secret(payload: dict, aad: str) -> dict:
-    """Encrypt {password, notes} under a fresh DEK, then wrap the DEK with the KEK.
+def is_available(key_b64: str | None = None) -> bool:
+    """True only if a well-formed 32-byte key is configured (AC5). No argument = the KEK."""
+    return _resolve_key(key_b64) is not None
+
+
+def encrypt_secret(payload: dict, aad: str, *, key_b64: str | None = None) -> dict:
+    """Encrypt a payload under a fresh DEK, then wrap the DEK with the KEK (or `key_b64`).
 
     Raises RuntimeError if called without checking is_available() first — callers
     must check is_available() and reject the request (503) before ever reaching
     here, so no plaintext is persisted (AC5).
     """
-    kek = _load_kek()
+    kek = _resolve_key(key_b64)
     if kek is None:
         raise RuntimeError("vault_crypto.encrypt_secret called without an available KEK")
 
@@ -85,11 +97,11 @@ def encrypt_secret(payload: dict, aad: str) -> dict:
     }
 
 
-def decrypt_secret(row: dict, aad: str) -> dict:
-    """Unwrap the DEK with the KEK, then decrypt the payload. Raises InvalidTag
-    if the AAD (owner) doesn't match or the ciphertext/wrapped_dek was tampered.
+def decrypt_secret(row: dict, aad: str, *, key_b64: str | None = None) -> dict:
+    """Unwrap the DEK with the KEK (or `key_b64`), then decrypt the payload. Raises
+    InvalidTag if the AAD (owner) doesn't match or the ciphertext/wrapped_dek was tampered.
     """
-    kek = _load_kek()
+    kek = _resolve_key(key_b64)
     if kek is None:
         raise RuntimeError("vault_crypto.decrypt_secret called without an available KEK")
 
