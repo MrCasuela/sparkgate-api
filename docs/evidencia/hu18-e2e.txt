@@ -1,0 +1,87 @@
+HU18 E2E — 2026-09-20T02:40:56.937790+00:00
+Base URL: http://localhost:8001
+
+Preparación: org=44bd7230…  admin=ddafa445…  trabajador=870930a1…
+
+--- A. Sin segundo factor
+PASS  1. Sin factor, revelar la credencial de un integrante -> 403 con code=totp_no_enrolado (fue 403 totp_no_enrolado)
+PASS  2. Ese intento quedó en dashboard_audit_log (lectura directa) como consultar_secreto_denegado con denied_reason=totp_no_enrolado (1 fila)
+PASS  3. El 403 no trae el plaintext y NO hay ninguna fila consultar_secreto: no accedió a la credencial (AC4)
+PASS  4. GET /me/mfa sin factor -> enrolled=false, pending=false
+PASS  5. El TRABAJADOR sin factor tampoco retira la credencial que le asignaron -> 403 totp_no_enrolado (fue 403 totp_no_enrolado)
+
+--- B. Enrolamiento
+PASS  6. POST /me/mfa/enroll -> 201 con un otpauth:// parseable (issuer=SparkGate, SHA1, 6 dígitos, 30 s) (fue 201)
+PASS  7. Enrolado pero SIN confirmar, un código VÁLIDO para ese secreto no habilita nada: sigue totp_no_enrolado (no totp_invalido) (fue 403 totp_no_enrolado)
+PASS  8. POST /me/mfa/confirm con un código real de pyotp -> 200 y GET /me/mfa dice enrolled=true (fue 200)
+PASS  9. Enrolar de nuevo sobre un factor confirmado -> 409 (un JWT robado no puede pisar el factor de la víctima) (fue 409)
+PASS  10. Lo persistido del factor es un sobre cifrado: el secreto TOTP no está en claro en la fila (lectura directa)
+PASS  11. El trabajador enrola y confirma su propio factor (require_user, no require_enterprise) (fue 201/200)
+
+--- C. Lectura con segundo factor
+  … esperando 26 s (confirmar consumió el paso actual): el anti-replay de RFC 6238 impide reusar un código
+PASS  12. Con un código vigente la empresa lee la credencial y el plaintext coincide con lo guardado (AC1) (fue 200)
+PASS  13. Reusar ese MISMO código -> 403 totp_reutilizado (anti-replay RFC 6238 §5.2) (fue 403 totp_reutilizado)
+PASS  14. Un código incorrecto -> 403 totp_invalido (fue 403 totp_invalido)
+PASS  15. El 403 de un código incorrecto no trae el plaintext (AC4)
+PASS  16. La auditoría (lectura directa) tiene UNA lectura exitosa y las denegaciones con su motivo: no_enrolado ×3 (admin sin factor, trabajador sin factor, admin con factor pendiente), reutilizado ×1, invalido ×1 (AC4)
+PASS  17. El trabajador, con SU código, retira la credencial que la empresa le asignó (fue 200)
+PASS  18. El trabajador ve el ciclo de vida de su factor en su propia auditoría (mfa_enrolar, mfa_activar): ['mfa_activar', 'mfa_enrolar']
+
+--- D. Rotación de una cuenta interna (AC2) y revocación de sesiones (AC5)
+  … esperando 27 s (el código anterior ya se usó): el anti-replay de RFC 6238 impide reusar un código
+PASS  19. Revocar SIN código -> 403 + fila revocar_interna_denegado, y NADA se ejecutó: la credencial sigue activa y el token del trabajador sigue sirviendo (fue 403)
+PASS  20. Revocar CON un código vigente -> 200; genera la contraseña nueva, Auth la acepta y queda guardada cifrada (AC2) (fue 200)
+PASS  21. La credencial quedó `revocada` en la base (lectura directa)
+PASS  22. AC5 MEDIDO — el access token que el trabajador YA tenía deja de servir en la petición siguiente -> 401 (fue 401). verify_token consulta a Auth en CADA request: no valida el JWT localmente
+      login con la contraseña VIEJA -> 400 user_banned
+      login con la contraseña NUEVA -> 400 user_banned
+PASS  23. AC5 MEDIDO — sesiones futuras bloqueadas: ni la contraseña vieja ni la nueva inician sesión (la cuenta está baneada) (fue 400/400)
+      refresh con el refresh_token previo -> 400 refresh_token_not_found
+PASS  24. AC5 MEDIDO — el refresh token emitido ANTES de revocar ya no renueva la sesión (fue 400)
+
+--- E. Cuenta externa: sugerida y pendiente de aplicación manual (AC3)
+PASS  25. Sugerir SIN código -> 403 + fila sugerir_externa_denegado, y la credencial sigue `activa` (fue 403)
+  … esperando 26 s (el código anterior ya se usó): el anti-replay de RFC 6238 impide reusar un código
+PASS  26. Sugerir CON código -> 200, contraseña sugerida, estado `pendiente_aplicacion_manual`, y NO declara el cambio efectuado: applied_password es null (AC3) (fue 200)
+
+--- F. Guardar una contraseña nueva (es rotar)
+PASS  27. PUT /secret SIN código -> 403 + fila guardar_secreto_denegado, y secret_updated_at no cambió (fue 403)
+  … esperando 28 s (el código anterior ya se usó): el anti-replay de RFC 6238 impide reusar un código
+PASS  28. PUT /secret CON código -> 200 y secret_updated_at avanzó (fue 200)
+
+--- G. Desactivar el factor
+PASS  29. DELETE /me/mfa con un código incorrecto -> 403 y el factor SIGUE activo (fue 403, enrolled=True)
+  … esperando 28 s (el código anterior ya se usó): el anti-replay de RFC 6238 impide reusar un código
+PASS  30. DELETE con un código vigente -> 204, y el siguiente intento vuelve a totp_no_enrolado (fue 204/totp_no_enrolado)
+
+--- H. Bloqueo por intentos fallidos
+PASS  31. 5 códigos incorrectos seguidos -> el último responde totp_bloqueado (['totp_invalido', 'totp_invalido', 'totp_invalido', 'totp_invalido', 'totp_bloqueado'])
+  … esperando 25 s (un código NUEVO y válido, para que no se rechace por reutilizado): el anti-replay de RFC 6238 impide reusar un código
+PASS  32. Bloqueado, ni siquiera un código CORRECTO y fresco pasa: sigue totp_bloqueado (fue 403 totp_bloqueado)
+
+--- I. Integridad de la auditoría y ausencia de fugas
+PASS  33. Las dos cadenas de auditoría siguen íntegras con todas las entradas de esta corrida (panel=True, vault=True)
+PASS  34. Ninguna contraseña, secreto TOTP ni URI otpauth:// (11) aparece en las filas de auditoría de esta corrida, ni ninguno de los 11 códigos usados como valor (filtrados: 0 + 0); 22 filas del panel y 8 del vault revisadas
+PASS  35. Todo denied_reason en la auditoría es uno de los cuatro enums, nunca un código: ['totp_bloqueado', 'totp_invalido', 'totp_no_enrolado', 'totp_reutilizado']
+
+SKIP  Revocar con la KEK de la bóveda caída (la razón de tener DOS claves): exige reiniciar el backend sin VAULT_MASTER_KEY, un proceso que este script no posee. Cubierto con mocks en test_dashboard_credentials.py; ver M1.
+SKIP  Fallar cerrado sin TOTP_MASTER_KEY (503): exige reiniciar el backend sin ella. Cubierto con mocks; ver M2.
+SKIP  Deriva de reloj > 30 s: exige alterar el reloj del sistema o del servidor. Se cubre de forma hermética en tests/test_totp_service.py con un reloj inyectado.
+SKIP  Expiración del bloqueo a los 15 min (el paso 31-32 prueba que bloquea, no que se libera): se cubre en tests/test_totp_service.py con un reloj inyectado.
+SKIP  PUT /secret con apply_to_account contra Auth real: en este punto la cuenta interna ya está revocada. Se cubre con mocks (orden: el factor va ANTES de tocar Auth).
+SKIP  Ventana de ~1 h de un JWT validado SIN consultar a Auth: no existe ningún validador offline en este sistema (verify_token consulta a GoTrue en cada request, pasos 22 y 24), así que no hay nada que medir. La limitación existe para un tercero que valide el JWT por su cuenta, y queda DOCUMENTADA, no oculta, en ARQUITECTURA.md §7.
+
+MANUAL (no automatizable):
+  M1. Con el backend reiniciado SIN VAULT_MASTER_KEY: revocar una cuenta interna con un código vigente debe
+      responder 200 (verifica el TOTP, banea y rota) con secret_stored=false; leer un secreto sigue dando 503.
+  M2. Con el backend reiniciado SIN TOTP_MASTER_KEY: cualquier operación sensible debe responder 503 y no
+      hacer nada (falla cerrado, no se omite el segundo factor).
+  M3. Escanear el QR con Google Authenticator / Authy REALES (python scripts/seed_hu18_factor.py) y rotar una
+      credencial con el código que muestra el teléfono: es la única prueba de que SHA1/6/30 es compatible
+      con una app real. pyotp por defecto usa los mismos parámetros, pero no es un teléfono.
+
+Limpieza (E2E_HU18_CLEANUP=1)...
+Limpieza terminada.
+
+35/35 pasos OK, 6 omitidos (no cuentan como PASS).
