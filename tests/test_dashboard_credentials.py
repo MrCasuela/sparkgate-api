@@ -7,6 +7,7 @@ test: ninguna contraseña llega jamás a ningún payload de auditoría, por ning
 """
 
 import json
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -21,7 +22,7 @@ from app.core.config import settings
 from app.main import app
 from app.schemas.passwords import PasswordGenerateResponse
 from app.services import ai_engine, dashboard_repo, password_factory, secret_access, vault_crypto
-from tests.totp_fakes import enroll_real_factor, totp_env
+from tests.totp_fakes import Factor, enroll_real_factor, totp_env
 
 NOW = datetime.now(timezone.utc).isoformat()
 ORG_ID = "org-1"
@@ -783,6 +784,86 @@ async def test_ninguna_contrasena_llega_a_ningun_payload_de_auditoria_por_ningun
 
     # Y tampoco en lo persistido: lo que llega a la tabla es un sobre, nunca texto.
     assert not any(secreto in json.dumps(world.secrets) for secreto in secretos)
+
+
+@pytest.mark.asyncio
+async def test_ni_el_secreto_del_factor_ni_un_codigo_llegan_a_ningun_payload_de_auditoria(
+    client, world, monkeypatch
+):
+    """La piedra angular, con el segundo factor. El recorrido de arriba corre con el verificador
+    anulado, así que no puede producir un solo denegado. Este recorre, con la cadena REAL, el
+    enrolamiento, las tres lecturas/escrituras DENEGADAS (sin código y con código malo) y las
+    tres EXITOSAS, y exige que en ninguno de los dos logs aparezca: una contraseña, el secreto
+    TOTP, el URI otpauth://, ni un solo código de seis dígitos que se haya mandado."""
+    env = totp_env(monkeypatch)
+    world.credentials["cred-ext-2"] = _credential(id="cred-ext-2", service_name="Dropbox")
+    contrasenas = {"Guardar#Dos22", "Revocada#Tres3", "Sugerida#Cuatro4", "nota-guardar",
+                   world.plaintext["password"], world.plaintext["notes"]}
+    codigos: list[str] = []
+
+    async def con_codigo(ac, method, url, factor, **kw):
+        code = factor.code()
+        codigos.append(code)
+        response = await ac.request(method, url, headers={TOTP: code}, **kw)
+        factor.tick()
+        return response
+
+    async def con_codigo_malo(ac, method, url, factor, **kw):
+        wrong = factor.wrong_code()
+        codigos.append(wrong)
+        return await ac.request(method, url, headers={TOTP: wrong}, **kw)
+
+    async with client as ac:
+        enrol = (await ac.post("/api/v1/me/mfa/enroll")).json()
+        factor = Factor(env, enrol["secret"])
+        assert (await con_codigo(ac, "POST", "/api/v1/me/mfa/confirm", factor)).status_code == 200
+
+        put = "/api/v1/dashboard/credentials/cred-ext-1/secret"
+        put_body = {"password": "Guardar#Dos22", "notes": "nota-guardar"}
+        await ac.put(put, json=put_body)                                   # sin código
+        await con_codigo_malo(ac, "PUT", put, factor, json=put_body)       # código malo
+        assert (await con_codigo(ac, "PUT", put, factor, json=put_body)).status_code == 200
+
+        reveal = "/api/v1/dashboard/credentials/cred-ext-1/secret/reveal"
+        _store(world)
+        await ac.post(reveal)
+        assert (await con_codigo(ac, "POST", reveal, factor)).status_code == 200
+
+        revoke = "/api/v1/dashboard/credentials/cred-int-1/revoke"
+        await ac.post(revoke, json={"new_password": "Revocada#Tres3"})
+        await con_codigo_malo(ac, "POST", revoke, factor, json={"new_password": "Revocada#Tres3"})
+        assert (await con_codigo(ac, "POST", revoke, factor, json={"new_password": "Revocada#Tres3"})).status_code == 200
+
+        suggest = "/api/v1/dashboard/credentials/cred-ext-2/suggest"
+        await ac.post(suggest, json={"new_password": "Sugerida#Cuatro4"})
+        assert (await con_codigo(ac, "POST", suggest, factor, json={"new_password": "Sugerida#Cuatro4"})).status_code == 200
+
+        assert (await con_codigo(ac, "DELETE", "/api/v1/me/mfa", factor)).status_code == 204
+
+    acciones = {a["action"] for a in world.audit}
+    assert {"guardar_secreto_denegado", "consultar_secreto_denegado", "revocar_interna_denegado",
+            "sugerir_externa_denegado", "guardar_secreto", "consultar_secreto", "revocar_interna",
+            "sugerir_externa"} <= acciones, "el recorrido no llegó a todos los caminos"
+    assert {"mfa_enrolar", "mfa_activar", "mfa_desactivar"} <= {a["action"] for a in world.vault_audit}
+
+    serializado = json.dumps({"panel": world.audit, "vault": world.vault_audit}, default=str)
+    prohibidos = contrasenas | {enrol["secret"], enrol["otpauth_uri"]} | set(codigos)
+    for valor in prohibidos:
+        assert valor not in serializado, f"'{valor[:6]}…' llegó a un payload de auditoría"
+
+    claves_prohibidas = {"password", "new_password", "notes", "ciphertext", "wrapped_dek", "secret",
+                         "totp_secret", "secret_envelope", "otpauth_uri", "code"}
+    for entrada in world.audit + world.vault_audit:
+        assert claves_prohibidas.isdisjoint(entrada), f"clave prohibida en {entrada}"
+
+    # El motivo de una denegación es SIEMPRE un enum: nunca algo que pueda ser un código.
+    motivos = {a["denied_reason"] for a in world.audit if a.get("denied_reason")}
+    assert motivos <= {"totp_no_enrolado", "totp_invalido", "totp_reutilizado", "totp_bloqueado"}
+    assert not any(re.fullmatch(r"\d{6}", m) for m in motivos)
+
+    # Y lo persistido del factor es un sobre: el secreto no está en claro ni en la fila ni
+    # en lo que recibió el repositorio.
+    assert enrol["secret"] not in json.dumps(env.repo.envelopes_sealed)
 
 
 # =========================================================================== segundo factor real (HU18)
