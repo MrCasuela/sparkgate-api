@@ -9,9 +9,11 @@ from app.core.exceptions import (
     ServiceUnavailableError,
     HIBPError,
     AIServiceError,
+    StepUpRequired,
     service_unavailable_handler,
     hibp_error_handler,
     ai_error_handler,
+    step_up_required_handler,
 )
 
 logging.basicConfig(
@@ -49,5 +51,6 @@ app.include_router(me.router)
 app.add_exception_handler(ServiceUnavailableError, service_unavailable_handler)
 app.add_exception_handler(HIBPError, hibp_error_handler)
 app.add_exception_handler(AIServiceError, ai_error_handler)
+app.add_exception_handler(StepUpRequired, step_up_required_handler)
 
 logger.info("SparkGate API started — env=%s", settings.env)

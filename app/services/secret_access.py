@@ -17,9 +17,7 @@ es lo que HU18 pide.
 import logging
 from typing import Callable, Literal
 
-from fastapi import HTTPException, status
-
-from app.core.exceptions import ServiceUnavailableError
+from app.core.exceptions import ServiceUnavailableError, StepUpRequired
 from app.services import vault_crypto
 
 logger = logging.getLogger("sparkgate.secret_access")
@@ -30,14 +28,6 @@ Scope = Literal["vault_item", "org_credential"]
 # (son distintas en cada log: no se fuerza acá un esquema de dos tablas).
 DENIED_INTEGRITY = "integridad"
 DENIED_STEP_UP = "step_up"
-
-
-class StepUpRequired(HTTPException):
-    """403: la operación exige un segundo factor. Existe vacía desde hoy para que la
-    ruta y el contrato de error no cambien cuando HU18 la use."""
-
-    def __init__(self, detail: str = "Esta operación requiere un segundo factor."):
-        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def require_available() -> None:
