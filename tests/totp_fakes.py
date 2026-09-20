@@ -98,6 +98,12 @@ class Factor:
     def tick(self):
         self.env.tick()
 
+    def wrong_code(self) -> str:
+        """Un código de formato válido que NO corresponde a ninguno de los tres pasos de la
+        ventana. Uno al azar colisionaría 3 de cada 10^6 veces: eso no es evidencia."""
+        valid = {self.code(steps) for steps in (-1, 0, 1)}
+        return next(c for c in (f"{n:06d}" for n in range(100000, 100100)) if c not in valid)
+
 
 def totp_env(monkeypatch) -> TotpEnv:
     """Instala el repo en memoria, el reloj y TOTP_MASTER_KEY, y vuelve a poner el

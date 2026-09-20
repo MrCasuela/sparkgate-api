@@ -9,6 +9,7 @@ from app.main import app
 from app.api import dependencies
 from app.api.dependencies import verify_token
 from app.api.routes import dashboard
+from app.services import secret_access
 
 NOW = datetime.now(timezone.utc).isoformat()
 
@@ -45,6 +46,14 @@ NEW_PASSWORD = "NuevaClave#Segura99"
 def client():
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
+
+
+@pytest.fixture(autouse=True)
+def sin_segundo_factor(monkeypatch):
+    """Estos tests miden qué hacen revoke/suggest con Auth y la base, no el factor: se anula el
+    verificador. Que esas rutas LO EXIGEN de verdad lo miden test_dashboard_credentials.py y
+    test_secret_access.py, con la cadena real."""
+    monkeypatch.setattr(secret_access, "_verify_step_up", lambda caller, scope, code: None)
 
 
 @pytest.fixture(autouse=True)

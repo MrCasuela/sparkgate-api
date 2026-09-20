@@ -17,6 +17,7 @@ from httpx import AsyncClient, ASGITransport
 from app.api import dependencies
 from app.api.dependencies import verify_token
 from app.api.routes import dashboard
+from app.core.config import settings
 from app.main import app
 from app.services import dashboard_repo, secret_access, vault_crypto
 from tests.totp_fakes import enroll_real_factor, totp_env
@@ -824,3 +825,202 @@ async def test_revelar_una_credencial_exige_el_segundo_factor_de_verdad(client, 
         ("consultar_secreto", None),
         ("consultar_secreto_denegado", "totp_reutilizado"),
     ]
+
+
+# --------------------------------------------------------------------------- escrituras (AC2/AC3/AC4)
+
+REVOKE = "/api/v1/dashboard/credentials/cred-int-1/revoke"
+SUGGEST = "/api/v1/dashboard/credentials/cred-ext-1/suggest"
+SECRET_INT = "/api/v1/dashboard/credentials/cred-int-1/secret"
+SECRET_EXT = "/api/v1/dashboard/credentials/cred-ext-1/secret"
+
+
+def _denegados(world):
+    return [(a["action"], a.get("denied_reason")) for a in world.audit]
+
+
+def _sin_efectos(world, *, cid):
+    """Nada se ejecutó: ni Auth, ni sobre, ni estado, ni sugerencias de rotación."""
+    world.admin.auth.admin.update_user_by_id.assert_not_called()
+    assert world.sealed == [] and world.secrets == {} and world.rotation_marked == []
+    assert world.credentials[cid]["status"] == "activa"
+    assert world.credentials[cid]["secret_updated_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_revocar_exige_el_segundo_factor_y_un_rechazo_no_toca_nada(client, world, monkeypatch):
+    """AC2 + AC4 con la cadena REAL. Un código ausente o inválido deniega, no toca Auth ni la
+    base, y deja la entrada de denegado con el motivo. Con un código vigente rota la contraseña
+    y banea (revoca sesiones y refresh tokens) en UNA llamada a la Admin API."""
+    env = totp_env(monkeypatch)
+    factor = enroll_real_factor(env, ADMIN_ID)
+
+    async with client as ac:
+        sin_codigo = await ac.post(REVOKE, json={})
+        malo = await ac.post(REVOKE, json={}, headers={TOTP: factor.wrong_code()})
+        assert (sin_codigo.status_code, malo.status_code) == (403, 403)
+        assert sin_codigo.json()["code"] == malo.json()["code"] == "totp_invalido"
+        _sin_efectos(world, cid="cred-int-1")
+
+        bueno = await ac.post(REVOKE, json={}, headers={TOTP: factor.code()})
+
+    assert bueno.status_code == 200
+    body = bueno.json()
+    assert body["admin_api_success"] is True and body["applied_password"]
+    world.admin.auth.admin.update_user_by_id.assert_called_once_with(
+        WORKER_USER_ID, {"password": body["applied_password"], "ban_duration": "87600h"}
+    )
+    assert world.credentials["cred-int-1"]["status"] == "revocada"
+    assert _denegados(world) == [
+        ("revocar_interna_denegado", "totp_invalido"),
+        ("revocar_interna_denegado", "totp_invalido"),
+        ("revocar_interna", None),
+    ]
+    assert world.audit[0]["credential_id"] == "cred-int-1" and world.audit[0]["credential_type"] == "interna"
+
+
+@pytest.mark.asyncio
+async def test_revocar_sin_haber_enrolado_lleva_a_enrolarse(client, world, monkeypatch):
+    totp_env(monkeypatch)  # nadie enrolado
+    async with client as ac:
+        response = await ac.post(REVOKE, json={}, headers={TOTP: "123456"})
+
+    assert response.status_code == 403 and response.json()["code"] == "totp_no_enrolado"
+    _sin_efectos(world, cid="cred-int-1")
+    assert _denegados(world) == [("revocar_interna_denegado", "totp_no_enrolado")]
+
+
+@pytest.mark.asyncio
+async def test_revocar_con_la_kek_caida_sigue_funcionando_con_el_segundo_factor(client, world, monkeypatch):
+    """La razón de tener DOS claves. Revocar a quien se va no puede depender de la KEK de la
+    bóveda, y ahora exige un factor sellado con otra clave. Con la KEK caída: verifica el
+    TOTP, banea y rota; solo secret_stored=false, y la respuesta es la única copia."""
+    env = totp_env(monkeypatch)
+    factor = enroll_real_factor(env, ADMIN_ID)
+    world.kek_available = False
+
+    def seal_sin_kek(*, subject_id, password, notes=None):
+        # Lo que hace el seal_secret REAL sin clave maestra (el del World no lo modela).
+        raise RuntimeError("seal_secret sin KEK")
+
+    monkeypatch.setattr(secret_access, "seal_secret", seal_sin_kek)
+
+    async with client as ac:
+        response = await ac.post(REVOKE, json={}, headers={TOTP: factor.code()})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["admin_api_success"] is True and body["applied_password"]
+    assert body["secret_stored"] is False
+    assert world.credentials["cred-int-1"]["status"] == "revocada"
+
+
+@pytest.mark.asyncio
+async def test_sin_la_clave_del_factor_revocar_falla_cerrado_y_no_hace_nada(client, world, monkeypatch):
+    """No poder verificar el segundo factor NO es «código inválido» y NUNCA deja pasar."""
+    env = totp_env(monkeypatch)
+    factor = enroll_real_factor(env, ADMIN_ID)
+    monkeypatch.setattr(settings, "totp_master_key", "")
+
+    async with client as ac:
+        response = await ac.post(REVOKE, json={}, headers={TOTP: factor.code()})
+
+    assert response.status_code == 503
+    _sin_efectos(world, cid="cred-int-1")
+    assert world.audit == []  # no es una denegación del usuario
+
+
+@pytest.mark.asyncio
+async def test_sugerir_exige_el_segundo_factor_y_deja_la_externa_pendiente_sin_afirmar_el_cambio(
+    client, world, monkeypatch
+):
+    """AC3 + AC4. Denegado: la externa sigue `activa` y no se generó nada. Con código: queda
+    `pendiente_aplicacion_manual`, se devuelve una contraseña sugerida, y NO se llama a Auth
+    (SparkGate no controla el proveedor: el cambio no se declara efectuado)."""
+    env = totp_env(monkeypatch)
+    factor = enroll_real_factor(env, ADMIN_ID)
+
+    async with client as ac:
+        denegado = await ac.post(SUGGEST, json={}, headers={TOTP: factor.wrong_code()})
+        assert denegado.status_code == 403
+        _sin_efectos(world, cid="cred-ext-1")
+        bueno = await ac.post(SUGGEST, json={}, headers={TOTP: factor.code()})
+
+    assert bueno.status_code == 200
+    body = bueno.json()
+    assert body["suggested_password"]
+    assert body["applied_password"] is None  # no se declara aplicado
+    assert body["credential"]["status"] == "pendiente_aplicacion_manual"
+    world.admin.auth.admin.update_user_by_id.assert_not_called()
+    assert _denegados(world) == [("sugerir_externa_denegado", "totp_invalido"), ("sugerir_externa", None)]
+    assert world.audit[0]["credential_type"] == "externa"
+
+
+@pytest.mark.asyncio
+async def test_guardar_una_contrasena_exige_el_segundo_factor_antes_de_tocar_auth(client, world, monkeypatch):
+    """PUT /secret con apply_to_account cambia la contraseña de una cuenta REAL. Un rechazo
+    tiene que dejar Auth intacto: sin este orden quedaría la cuenta con la contraseña nueva y
+    la operación denegada."""
+    env = totp_env(monkeypatch)
+    factor = enroll_real_factor(env, ADMIN_ID)
+
+    async with client as ac:
+        denegado = await _put_secret(ac, "cred-int-1", password="Nueva#Clave77", apply_to_account=True)
+        assert denegado.status_code == 403
+        _sin_efectos(world, cid="cred-int-1")
+        assert _denegados(world) == [("guardar_secreto_denegado", "totp_invalido")]
+
+        bueno = await ac.put(
+            SECRET_INT, json={"password": "Nueva#Clave77", "apply_to_account": True},
+            headers={TOTP: factor.code()},
+        )
+
+    assert bueno.status_code == 200
+    world.admin.auth.admin.update_user_by_id.assert_called_once_with(
+        WORKER_USER_ID, {"password": "Nueva#Clave77"}
+    )
+    assert world.sealed[0]["password"] == "Nueva#Clave77"
+
+
+@pytest.mark.asyncio
+async def test_guardar_sin_aplicar_a_la_cuenta_tambien_exige_el_segundo_factor(client, world, monkeypatch):
+    """Guardar una contraseña nueva ES rotar (es lo único que apaga rotation_required), así
+    que no basta con gatear el caso de la cuenta interna."""
+    env = totp_env(monkeypatch)
+    enroll_real_factor(env, ADMIN_ID)
+
+    async with client as ac:
+        response = await _put_secret(ac, "cred-ext-1", password="Nueva#Clave88")
+
+    assert response.status_code == 403
+    _sin_efectos(world, cid="cred-ext-1")
+    assert _denegados(world) == [("guardar_secreto_denegado", "totp_invalido")]
+
+
+@pytest.mark.asyncio
+async def test_las_guardas_responden_antes_de_pedir_el_segundo_factor(client, world, monkeypatch):
+    """Un 400/404 no consume un código TOTP (uno cada 30 s) ni deja un denegado en la
+    auditoría: la petición igual iba a fallar. Nadie está enrolado, así que cualquier llamada
+    que llegara al factor daría 403."""
+    totp_env(monkeypatch)
+    world.credentials["cred-int-2"] = _credential(
+        id="cred-int-2", type="interna", supabase_user_id="w2", status="revocada"
+    )
+
+    async with client as ac:
+        respuestas = {
+            "revocar una externa": await ac.post("/api/v1/dashboard/credentials/cred-ext-1/revoke", json={}),
+            "revocar una ya revocada": await ac.post("/api/v1/dashboard/credentials/cred-int-2/revoke", json={}),
+            "revocar una inexistente": await ac.post("/api/v1/dashboard/credentials/nada/revoke", json={}),
+            "sugerir una interna": await ac.post("/api/v1/dashboard/credentials/cred-int-1/suggest", json={}),
+            "aplicar a una externa": await _put_secret(
+                ac, "cred-ext-1", password="Nueva#Clave99", apply_to_account=True
+            ),
+            "guardar en una inexistente": await _put_secret(ac, "nada", password="Nueva#Clave99"),
+        }
+
+    assert {k: r.status_code for k, r in respuestas.items()} == {
+        "revocar una externa": 400, "revocar una ya revocada": 400, "revocar una inexistente": 404,
+        "sugerir una interna": 400, "aplicar a una externa": 400, "guardar en una inexistente": 404,
+    }
+    assert world.audit == []

@@ -351,11 +351,15 @@ async def save_credential_secret(
     credential_id: str,
     body: CredentialSecretRequest,
     caller: dict = Depends(require_enterprise),
+    step_up_code: str | None = Depends(optional_step_up_code),
 ):
     """Guarda o reemplaza la contraseña de una credencial de la organización.
 
     PUT porque es el reemplazo idempotente de un sub-recurso. NUNCA devuelve el
     plaintext: el cliente ya lo tiene, y verlo de nuevo es el reveal, que audita.
+
+    Exige el segundo factor (HU18): guardar una contraseña nueva ES rotar, y con
+    `apply_to_account` cambia la de una cuenta real.
     """
     # Antes de tocar la base: sin clave maestra no se persiste nada (AC5 / AC8).
     secret_access.require_available()
@@ -379,6 +383,26 @@ async def save_credential_secret(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Esta credencial no tiene una cuenta SparkGate vinculada.",
             )
+
+    # HU18 AC4. Después de las guardas (404, tipo, cuenta vinculada) y ANTES de cualquier
+    # efecto: no se quema un código TOTP (uno cada 30 s) en una petición que igual daría
+    # 400, y sobre todo un rechazo no puede dejar la cuenta de Auth con la contraseña
+    # nueva y la operación denegada. Es la ruta donde este orden más importa.
+    secret_access.require_step_up(
+        caller=caller,
+        scope="credential_secret_write",
+        code=step_up_code,
+        on_denied=lambda reason: _audit(
+            caller,
+            member_id=credential.get("member_id"),
+            credential_id=credential_id,
+            credential_type=credential["type"],
+            action="guardar_secreto_denegado",
+            denied_reason=reason,
+        ),
+    )
+
+    if body.apply_to_account:
         # Auth primero: lo guardado tiene que ser la contraseña VIGENTE, no una
         # anotación que no coincide con la cuenta.
         try:
@@ -541,7 +565,13 @@ async def revoke_internal_credential(
     credential_id: str,
     body: CredentialActionRequest,
     caller: dict = Depends(require_enterprise),
+    step_up_code: str | None = Depends(optional_step_up_code),
 ):
+    """Rota la contraseña de la cuenta interna y bloquea sus sesiones (HU18 AC2).
+
+    Exige un código TOTP vigente. Una sola llamada a la Admin API cambia la contraseña
+    y banea la cuenta: bloquea logins y refresh tokens de inmediato.
+    """
     credential = dashboard_repo.get_credential(credential_id, caller["org_id"])
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
@@ -560,6 +590,28 @@ async def revoke_internal_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Esta credencial interna ya está revocada.",
         )
+
+    # HU18 AC2/AC4. Después de las guardas y ANTES de cualquier efecto: no se quema un
+    # código TOTP en una petición que igual daría 400, y un rechazo no puede dejar la
+    # cuenta a medio rotar. Un código inválido o expirado deniega, no toca nada y queda
+    # en la auditoría con su motivo.
+    #
+    # Esto NO depende de la clave maestra de la bóveda: el factor va sellado con
+    # TOTP_MASTER_KEY, otra clave. Revocar a alguien que se va sigue funcionando con la
+    # KEK caída (solo secret_stored=false, y la respuesta es la única copia).
+    secret_access.require_step_up(
+        caller=caller,
+        scope="credential_rotation",
+        code=step_up_code,
+        on_denied=lambda reason: _audit(
+            caller,
+            member_id=credential["member_id"],
+            credential_id=credential_id,
+            credential_type="interna",
+            action="revocar_interna_denegado",
+            denied_reason=reason,
+        ),
+    )
 
     # auth.admin.sign_out(jwt, scope) revokes a *specific session by its own JWT* —
     # we only have the member's user_id (their JWT isn't ours to hold). update_user_by_id
@@ -634,7 +686,17 @@ async def suggest_external_credential(
     credential_id: str,
     body: CredentialActionRequest,
     caller: dict = Depends(require_enterprise),
+    step_up_code: str | None = Depends(optional_step_up_code),
 ):
+    """Genera una contraseña sugerida para una cuenta externa (HU18 AC3).
+
+    La deja `pendiente_aplicacion_manual` y NO afirma que el cambio se efectuó: SparkGate
+    no controla el proveedor, así que quien la aplica es una persona. Exige un código TOTP.
+
+    Ojo con la nomenclatura: `admin_api_success=True` en esta respuesta significa «el
+    backend hizo lo suyo», NO «el proveedor cambió la contraseña». No se renombra porque
+    rompería a la extensión; se documenta acá y en el anexo de HU18_PLAN.
+    """
     credential = dashboard_repo.get_credential(credential_id, caller["org_id"])
     if credential is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credencial no encontrada")
@@ -648,6 +710,21 @@ async def suggest_external_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Esta credencial externa ya tiene una contraseña pendiente de aplicación manual.",
         )
+
+    # HU18 AC4: después de las guardas y antes de cualquier efecto (ver revoke).
+    secret_access.require_step_up(
+        caller=caller,
+        scope="credential_suggestion",
+        code=step_up_code,
+        on_denied=lambda reason: _audit(
+            caller,
+            member_id=credential["member_id"],
+            credential_id=credential_id,
+            credential_type="externa",
+            action="sugerir_externa_denegado",
+            denied_reason=reason,
+        ),
+    )
 
     # Generate a proposed password server-side (AC3). It is returned to the caller
     # for manual application on the external service; SparkGate makes no promise to
