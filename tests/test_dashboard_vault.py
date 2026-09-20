@@ -15,7 +15,8 @@ from app.api import dependencies
 from app.api.dependencies import verify_token
 from app.api.routes import dashboard
 from app.main import app
-from app.services import vault_crypto
+from app.services import secret_access, vault_crypto
+from tests.totp_fakes import enroll_real_factor, totp_env
 
 ORG_ID = "org-1"
 CALLER_ID = "empresa-1"
@@ -73,6 +74,13 @@ def override_auth():
     }
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def sin_segundo_factor(monkeypatch):
+    """Estos tests miden el AAD y la doble auditoría, no el factor: se anula el verificador.
+    Los tests con «segundo_factor» en el nombre reponen la cadena real con totp_env()."""
+    monkeypatch.setattr(secret_access, "_verify_step_up", lambda caller, scope, code: None)
 
 
 @pytest.fixture(autouse=True)
@@ -463,3 +471,72 @@ async def test_fallo_de_integridad_responde_503_y_audita_error(client, monkeypat
     assert vault_audit[0]["result"] == "error"
     assert vault_audit[0]["action"] == "consultar_admin"
     assert dashboard_audit[0]["action"] == "consultar_vault_miembro"
+
+
+# --------------------------------------------------------------------------
+# Segundo factor real (HU18)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reveal_exige_el_segundo_factor_de_verdad_y_audita_las_dos_denegaciones(client, monkeypatch):
+    """Cadena REAL. Un rechazo del segundo factor deja las DOS entradas de denegado, igual que
+    la lectura exitosa deja las dos de éxito: la del vault es la que ve el trabajador en su
+    propia auditoría (que alguien intentó abrir su credencial y no pudo), la del panel la ve
+    la empresa, con el MOTIVO."""
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT)))
+    monkeypatch.setattr(dashboard.vault_repo, "get_item", lambda item_id, user_id: dict(STORED_ITEM))
+    decrypted = []
+    monkeypatch.setattr(
+        dashboard.secret_access.vault_crypto, "decrypt_secret",
+        lambda row, aad: decrypted.append(aad) or dict(PLAINTEXT),
+    )
+    vault_audit = _vault_audit_recorder(monkeypatch)
+    dashboard_audit = _dashboard_audit_recorder(monkeypatch)
+    env = totp_env(monkeypatch)
+    url = f"/api/v1/dashboard/members/{MEMBER_ID}/vault/{ITEM_ID}/reveal"
+
+    async with client as ac:
+        denegado = await ac.post(url)                      # el admin no está enrolado
+        factor = enroll_real_factor(env, CALLER_ID)
+        permitido = await ac.post(url, headers={"X-SparkGate-TOTP": factor.code()})
+
+    assert (denegado.status_code, denegado.json()["code"]) == (403, "totp_no_enrolado")
+    assert permitido.status_code == 200
+    assert PLAINTEXT["password"] not in denegado.text
+    assert decrypted == [OWNER_ID]  # solo el intento válido descifró, y con el AAD del DUEÑO
+
+    assert [(a["action"], a["result"], a["user_id"], a["actor_user_id"]) for a in vault_audit] == [
+        ("consultar_admin_denegado", "denegado", OWNER_ID, CALLER_ID),
+        ("consultar_admin", "ok", OWNER_ID, CALLER_ID),
+    ]
+    assert [(a["action"], a.get("denied_reason")) for a in dashboard_audit] == [
+        ("consultar_vault_miembro_denegado", "totp_no_enrolado"),
+        ("consultar_vault_miembro", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_un_fallo_de_integridad_no_se_confunde_con_un_rechazo_del_segundo_factor(client, monkeypatch):
+    """El cambio de `reason == DENIED_STEP_UP` a `reason != DENIED_INTEGRITY` no puede haber
+    movido la integridad al lado de las denegaciones: sigue siendo un ERROR, sin motivo de
+    step-up, y sigue respondiendo 503."""
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "is_available", lambda: True)
+    monkeypatch.setattr(dashboard.dashboard_repo, "get_member", _member_returning(dict(MEMBER_WITH_ACCOUNT)))
+    monkeypatch.setattr(dashboard.vault_repo, "get_item", lambda item_id, user_id: dict(STORED_ITEM))
+
+    def _tampered(row, aad):
+        raise vault_crypto.InvalidTag()
+
+    monkeypatch.setattr(dashboard.secret_access.vault_crypto, "decrypt_secret", _tampered)
+    vault_audit = _vault_audit_recorder(monkeypatch)
+    dashboard_audit = _dashboard_audit_recorder(monkeypatch)
+
+    async with client as ac:
+        response = await ac.post(f"/api/v1/dashboard/members/{MEMBER_ID}/vault/{ITEM_ID}/reveal")
+
+    assert response.status_code == 503
+    assert [(a["action"], a["result"]) for a in vault_audit] == [("consultar_admin", "error")]
+    assert [a["action"] for a in dashboard_audit] == ["consultar_vault_miembro"]
+    assert "denied_reason" not in dashboard_audit[0]

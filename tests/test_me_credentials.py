@@ -15,6 +15,7 @@ from app.api.dependencies import verify_token
 from app.api.routes import me
 from app.main import app
 from app.services import secret_access, vault_crypto
+from tests.totp_fakes import enroll_real_factor, totp_env
 
 NOW = datetime.now(timezone.utc).isoformat()
 ORG_ID = "org-1"
@@ -49,6 +50,13 @@ def worker():
     }
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def sin_segundo_factor(monkeypatch):
+    """Estos tests miden la ruta y sus guardas, no el factor: se anula el verificador. El test
+    con «segundo_factor» en el nombre repone la cadena real con totp_env()."""
+    monkeypatch.setattr(secret_access, "_verify_step_up", lambda caller, scope, code: None)
 
 
 @pytest.fixture
@@ -205,3 +213,26 @@ async def test_el_segundo_factor_de_hu18_tambien_cubre_al_trabajador(client, env
         sin = await ac.post("/api/v1/me/credentials/cred-1/reveal")
         con = await ac.post("/api/v1/me/credentials/cred-1/reveal", headers={"X-SparkGate-TOTP": "123456"})
     assert (sin.status_code, con.status_code) == (403, 200)
+
+
+@pytest.mark.asyncio
+async def test_el_trabajador_tambien_necesita_el_segundo_factor_de_verdad(client, env, monkeypatch):
+    """Decisión de HU18: TODO lector de un secreto ajeno lo exige, también el trabajador. La
+    credencial que retira es de la ORGANIZACIÓN, no suya. Cadena REAL; la denegación queda en
+    la cadena de la empresa con el motivo, atribuida al trabajador."""
+    totp = totp_env(monkeypatch)
+    url = "/api/v1/me/credentials/cred-1/reveal"
+
+    async with client as ac:
+        sin_factor = await ac.post(url)
+        factor = enroll_real_factor(totp, WORKER_ID)
+        con_factor = await ac.post(url, headers={"X-SparkGate-TOTP": factor.code()})
+
+    assert (sin_factor.status_code, sin_factor.json()["code"]) == (403, "totp_no_enrolado")
+    assert con_factor.status_code == 200 and con_factor.json()["password"] == "Clave-Real#1"
+    assert "Clave-Real#1" not in sin_factor.text
+    assert env["aad"] == [ORG_ID]  # solo el intento válido descifró
+    assert [(a["action"], a.get("denied_reason"), a["actor_user_id"]) for a in env["audit"]] == [
+        ("consultar_secreto_denegado", "totp_no_enrolado", WORKER_ID),
+        ("consultar_secreto_asignado", None, WORKER_ID),
+    ]

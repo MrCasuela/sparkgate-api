@@ -478,6 +478,7 @@ async def reveal_credential_secret(
             credential_id=credential_id,
             credential_type=credential["type"],
             action="consultar_secreto_denegado",
+            denied_reason=reason,
         )
 
     # El subject es el org_id leído de la MISMA fila que el criptograma, no el del
@@ -817,14 +818,18 @@ async def reveal_member_vault_item(
     def on_denied(reason: str) -> None:
         # Cada log tiene su propio vocabulario de "denegado"; por eso lo escribe la
         # ruta y no el punto de paso.
-        if reason == secret_access.DENIED_STEP_UP:
+        # La integridad es el caso especial (error del sistema, no un rechazo del usuario);
+        # todo lo demás, sea cual sea el motivo del segundo factor, es una denegación.
+        if reason != secret_access.DENIED_INTEGRITY:
             vault_action, vault_result = "consultar_admin_denegado", "denegado"
             panel_action = "consultar_vault_miembro_denegado"
+            panel_extra = {"denied_reason": reason}
         else:
             # Fallo de integridad: no es un rechazo del usuario sino un ítem que no
             # supera la verificación, y se registra como error.
             vault_action, vault_result = "consultar_admin", "error"
             panel_action = "consultar_vault_miembro"
+            panel_extra = {}
         vault_repo.insert_audit(
             user_id=owner_id,
             item_id=item_id,
@@ -832,7 +837,9 @@ async def reveal_member_vault_item(
             result=vault_result,
             actor_user_id=actor_id,
         )
-        _audit(caller, member_id=member_id, action=panel_action, vault_item_id=item_id)
+        _audit(
+            caller, member_id=member_id, action=panel_action, vault_item_id=item_id, **panel_extra
+        )
 
     # El AAD es el user_id del DUEÑO, no el del caller: identifica de quién es el
     # dato, no quién pregunta. Por eso el acceso de la empresa no obliga a tocar

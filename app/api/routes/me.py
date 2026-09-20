@@ -83,9 +83,10 @@ async def reveal_my_credential(
             detail="Esta credencial no tiene una contraseña guardada.",
         )
 
-    def audit(action: str) -> None:
+    def audit(action: str, denied_reason: str | None = None) -> None:
         # La empresa ve en su propia cadena quién retiró qué. El autor es el
         # trabajador, no un administrador.
+        extra = {"denied_reason": denied_reason} if denied_reason is not None else {}
         dashboard_repo.insert_audit_log(
             org_id=credential["org_id"],
             actor_user_id=user["id"],
@@ -94,6 +95,7 @@ async def reveal_my_credential(
             credential_id=credential_id,
             credential_type=credential["type"],
             action=action,
+            **extra,
         )
 
     secret = secret_access.read_foreign_secret(
@@ -103,7 +105,7 @@ async def reveal_my_credential(
         target_id=credential_id,
         envelope=envelope,
         step_up_code=step_up_code,
-        on_denied=lambda reason: audit("consultar_secreto_denegado"),
+        on_denied=lambda reason: audit("consultar_secreto_denegado", denied_reason=reason),
     )
 
     audit("consultar_secreto_asignado")

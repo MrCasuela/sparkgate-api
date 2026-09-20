@@ -6,28 +6,45 @@ existe otra forma de obtener plaintext ajeno, y un test escanea las rutas para q
 siga siendo así.
 
 Esto no es gateo de identidad (eso es dependencies.py) sino de ACCESO A SECRETOS, por
-eso vive acá. Existe para que HU18 sea un solo cambio: el segundo factor (TOTP) se
-verifica en `_verify_step_up` y en ningún otro lado. Ninguna ruta cambia.
+eso vive acá. El segundo factor (TOTP, HU18) se verifica en `_verify_step_up` y en ningún
+otro lado. Las lecturas lo alcanzan por `read_foreign_secret`; las ESCRITURAS sensibles
+(rotar, sugerir, aplicar una contraseña) por `require_step_up`, que entra por el mismo
+verificador: hay una sola puerta para el segundo factor, no una por ruta.
 
 Lo que NO pasa por acá: `GET /api/v1/vault/items/{id}`, el dueño leyendo lo suyo.
 Meterlo obligaría a pedirle TOTP al trabajador para ver su propia contraseña, que no
-es lo que HU18 pide.
+es lo que HU18 pide. Sí pasa por acá el trabajador que retira una credencial que la
+ORGANIZACIÓN le asignó (/me/credentials/{id}/reveal): ese secreto no es suyo.
 """
 
 import logging
 from typing import Callable, Literal
 
 from app.core.exceptions import ServiceUnavailableError, StepUpRequired
-from app.services import vault_crypto
+from app.services import totp_service, vault_crypto
 
 logger = logging.getLogger("sparkgate.secret_access")
 
-Scope = Literal["vault_item", "org_credential"]
+Scope = Literal[
+    "vault_item",
+    "org_credential",
+    "credential_rotation",
+    "credential_suggestion",
+    "credential_secret_write",
+]
 
 # Motivos que recibe on_denied, para que cada ruta escriba SU auditoría de denegado
 # (son distintas en cada log: no se fuerza acá un esquema de dos tablas).
+#
+# on_denied recibe un solo argumento: DENIED_INTEGRITY, o el `code` concreto por el que el
+# segundo factor rechazó (uno de los cuatro TOTP_*). Ya no hay un motivo genérico
+# "step_up": la auditoría necesita saber POR QUÉ, y la ruta se entera sin cambiar la firma
+# del callback.
 DENIED_INTEGRITY = "integridad"
-DENIED_STEP_UP = "step_up"
+TOTP_NO_ENROLADO = totp_service.NO_ENROLADO
+TOTP_INVALIDO = totp_service.INVALIDO
+TOTP_REUTILIZADO = totp_service.REUTILIZADO
+TOTP_BLOQUEADO = totp_service.BLOQUEADO
 
 
 def require_available() -> None:
@@ -60,13 +77,66 @@ def is_available() -> bool:
 
 
 def _verify_step_up(caller: dict, scope: Scope, code: str | None) -> None:
-    """HU18. Hoy no hace nada.
+    """HU18. El ÚNICO lugar del sistema donde se verifica el segundo factor.
 
-    Mañana: leer el código TOTP, validarlo contra el secreto del caller y lanzar
-    StepUpRequired si falta o no es válido. ES EL ÚNICO LUGAR QUE HU18 TIENE QUE
-    TOCAR para las lecturas de secretos ajenos.
+    El factor es del CALLER (quien pide), no del dueño del dato: es a él a quien se le
+    exige demostrar que tiene el segundo factor.
+
+    `scope` no selecciona factor: hay uno por persona y todos los alcances lo usan. Se
+    conserva en la firma porque distingue las operaciones en los logs y para que un
+    factor por alcance sea un cambio local.
+
+    Una lectura de base por operación sensible. Es aceptable: son operaciones de baja
+    frecuencia y auditadas, y verify_token ya paga una ida y vuelta de red a GoTrue en
+    CADA request. NO se cachea a propósito: cachear el estado de un factor es
+    exactamente lo que mantendría vivo uno recién desactivado.
+
+    Si el factor no se puede verificar (falta TOTP_MASTER_KEY, el sobre no abre) falla
+    CERRADO con 503: no poder verificar no es lo mismo que un código inválido, y jamás
+    se deja pasar por eso.
     """
-    return None
+    try:
+        totp_service.verify(caller["id"], code)
+    except totp_service.TotpDenied as denied:
+        # Solo el motivo: nunca el código ni el secreto.
+        logger.warning("Segundo factor denegado (scope=%s, motivo=%s)", scope, denied.code)
+        raise StepUpRequired(code=denied.code) from None
+    except totp_service.TotpUnavailable:
+        logger.error("Segundo factor imposible de verificar (scope=%s): falla cerrado", scope)
+        raise ServiceUnavailableError(
+            "Segundo factor",
+            detail="El segundo factor no se puede verificar en este momento. "
+            "Se rechaza la operación en vez de omitirlo.",
+        ) from None
+
+
+def require_step_up(
+    *,
+    caller: dict,
+    scope: Scope,
+    code: str | None,
+    on_denied: Callable[[str], None] | None = None,
+) -> None:
+    """Exige el segundo factor para una operación sensible que NO lee un secreto.
+
+    Es el mismo punto de paso que usa read_foreign_secret: las dos entran por
+    _verify_step_up. Existe para que las rutas de escritura no dupliquen el try/except ni
+    la llamada a on_denied.
+
+    Cada ruta la llama DESPUÉS de sus guardas (404, tipo, estado) y ANTES de cualquier
+    efecto: así no se quema un código (uno cada 30 s) en una petición que igual daría 400,
+    y un rechazo no deja la cuenta a medio rotar.
+
+    No comprueba la clave maestra de la bóveda: el factor está sellado con
+    TOTP_MASTER_KEY, otra clave, justamente para que revocar a alguien no dependa de que
+    la KEK esté arriba.
+    """
+    try:
+        _verify_step_up(caller, scope, code)
+    except StepUpRequired as exc:
+        if on_denied is not None:
+            on_denied(exc.code)
+        raise
 
 
 def read_foreign_secret(
@@ -83,7 +153,7 @@ def read_foreign_secret(
 
     Orden, que es parte del contrato:
       1. la clave maestra tiene que estar disponible  -> 503
-      2. segundo factor (HU18, hoy no-op)             -> 403 StepUpRequired
+      2. segundo factor (HU18)                        -> 403 StepUpRequired
       3. descifrar con AAD = subject_id               -> InvalidTag => 503
 
     `subject_id` es el dueño DEL DATO, leído de la misma fila que el criptograma: el
@@ -101,12 +171,7 @@ def read_foreign_secret(
     """
     require_available()
 
-    try:
-        _verify_step_up(caller, scope, step_up_code)
-    except StepUpRequired:
-        if on_denied is not None:
-            on_denied(DENIED_STEP_UP)
-        raise
+    require_step_up(caller=caller, scope=scope, code=step_up_code, on_denied=on_denied)
 
     try:
         return vault_crypto.decrypt_secret(envelope, aad=subject_id)
@@ -129,11 +194,15 @@ def read_foreign_secret(
 
 __all__ = [
     "DENIED_INTEGRITY",
-    "DENIED_STEP_UP",
+    "TOTP_BLOQUEADO",
+    "TOTP_INVALIDO",
+    "TOTP_NO_ENROLADO",
+    "TOTP_REUTILIZADO",
     "Scope",
     "StepUpRequired",
     "is_available",
     "read_foreign_secret",
     "require_available",
+    "require_step_up",
     "seal_secret",
 ]

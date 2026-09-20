@@ -19,6 +19,7 @@ from app.api.dependencies import verify_token
 from app.api.routes import dashboard
 from app.main import app
 from app.services import dashboard_repo, secret_access, vault_crypto
+from tests.totp_fakes import enroll_real_factor, totp_env
 
 NOW = datetime.now(timezone.utc).isoformat()
 ORG_ID = "org-1"
@@ -94,6 +95,15 @@ class World:
 @pytest.fixture
 def client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.fixture(autouse=True)
+def sin_segundo_factor(monkeypatch):
+    """Estos tests miden las RUTAS (auditoría, AAD, orden de efectos), no el factor: se anula
+    el verificador. El factor lo miden test_totp_service y test_secret_access; que cada ruta
+    LO EXIJA de verdad lo miden los tests de este archivo con «segundo_factor» en el nombre,
+    que reponen la cadena real con totp_env()."""
+    monkeypatch.setattr(secret_access, "_verify_step_up", lambda caller, scope, code: None)
 
 
 @pytest.fixture(autouse=True)
@@ -656,7 +666,7 @@ async def test_un_fallo_de_integridad_responde_503_y_queda_denegado(client, worl
 
 
 @pytest.mark.asyncio
-async def test_el_segundo_factor_de_hu18_entra_sin_tocar_la_ruta(client, world, monkeypatch):
+async def test_el_segundo_factor_de_hu18_entra_sin_tocar_la_ruta_de_lectura(client, world, monkeypatch):
     """Se reemplaza _verify_step_up por uno que exige el header, y la ruta, tal cual está,
     pasa a rechazar sin descifrar y a dejar la entrada de denegado. HU18 = un solo cambio."""
     _store(world)
@@ -771,3 +781,46 @@ async def test_ninguna_contrasena_llega_a_ningun_payload_de_auditoria_por_ningun
 
     # Y tampoco en lo persistido: lo que llega a la tabla es un sobre, nunca texto.
     assert not any(secreto in json.dumps(world.secrets) for secreto in secretos)
+
+
+# =========================================================================== segundo factor real (HU18)
+
+TOTP = "X-SparkGate-TOTP"
+
+
+@pytest.mark.asyncio
+async def test_revelar_una_credencial_exige_el_segundo_factor_de_verdad(client, world, monkeypatch):
+    """Cableado con la cadena REAL: ruta -> _verify_step_up -> totp_service -> repo en memoria.
+
+    Cubre AC4 en la lectura: un código inválido o ausente deniega, NO descifra, y deja la
+    entrada de denegado con el MOTIVO. El factor en sí lo prueba test_totp_service."""
+    _store(world)
+    env = totp_env(monkeypatch)
+    url = "/api/v1/dashboard/credentials/cred-ext-1/secret/reveal"
+
+    async with client as ac:
+        no_enrolado = await ac.post(url)                         # el admin nunca se enroló
+        factor = enroll_real_factor(env, ADMIN_ID)
+        sin_codigo = await ac.post(url)                          # enrolado, sin header
+        malo = await ac.post(url, headers={TOTP: "000000" if factor.code() != "000000" else "000001"})
+        code = factor.code()
+        bueno = await ac.post(url, headers={TOTP: code})
+        repetido = await ac.post(url, headers={TOTP: code})      # anti-replay
+
+    assert [r.status_code for r in (no_enrolado, sin_codigo, malo, bueno, repetido)] == [403, 403, 403, 200, 403]
+    assert [r.json().get("code") for r in (no_enrolado, sin_codigo, malo, repetido)] == [
+        "totp_no_enrolado", "totp_invalido", "totp_invalido", "totp_reutilizado",
+    ]
+    # Solo el intento válido descifró, y solo ahí sale el plaintext.
+    assert len(world.decrypt_aad) == 1
+    secret = world.plaintext["password"]
+    assert secret in bueno.text
+    assert all(secret not in r.text for r in (no_enrolado, sin_codigo, malo, repetido))
+    # AC4: cada intento fallido quedó auditado, con su motivo, y hay una sola lectura exitosa.
+    assert [(a["action"], a.get("denied_reason")) for a in world.audit] == [
+        ("consultar_secreto_denegado", "totp_no_enrolado"),
+        ("consultar_secreto_denegado", "totp_invalido"),
+        ("consultar_secreto_denegado", "totp_invalido"),
+        ("consultar_secreto", None),
+        ("consultar_secreto_denegado", "totp_reutilizado"),
+    ]
