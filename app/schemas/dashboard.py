@@ -155,4 +155,9 @@ class AuditLogEntryOut(BaseModel):
     credential_type: str | None = None
     vault_item_id: str | None = None
     action: str
+    # HU18: por qué el segundo factor rechazó la operación (totp_no_enrolado,
+    # totp_invalido, totp_reutilizado, totp_bloqueado). Solo en las entradas *_denegado.
+    # Sin este campo Pydantic descartaría la clave en silencio y el motivo existiría en la
+    # base sin que nadie pudiera verlo (el fallo G8).
+    denied_reason: str | None = None
     created_at: datetime

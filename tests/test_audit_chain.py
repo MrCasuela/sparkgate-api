@@ -371,3 +371,90 @@ def test_un_error_que_no_es_colision_no_se_reintenta(racy_admin):
     with pytest.raises(RuntimeError):
         audit_chain.append_entry("t", {"action": "guardar"})
     assert admin.attempts == 1
+
+
+# --------------------------------------------------------------------------
+# denied_reason (HU18): por qué el segundo factor rechazó una operación
+# --------------------------------------------------------------------------
+
+
+def _insert_denied(reason, action="revocar_interna_denegado"):
+    return dashboard_repo.insert_audit_log(
+        org_id="org-1",
+        actor_user_id="admin-1",
+        actor_email="admin@pyme.cl",
+        member_id="member-1",
+        action=action,
+        credential_id="cred-1",
+        credential_type="interna",
+        denied_reason=reason,
+    )
+
+
+def test_denied_reason_va_en_el_payload_solo_cuando_existe(fake_admin):
+    con = _insert_denied("totp_invalido")
+    sin = dashboard_repo.insert_audit_log(
+        org_id="org-1", actor_user_id="a", actor_email=None, member_id=None, action="crear_trabajador"
+    )
+
+    assert con["payload"]["denied_reason"] == "totp_invalido"
+    # Las demás acciones quedan con el payload de siempre: el de igualdad exacta no cambia.
+    assert "denied_reason" not in sin["payload"]
+
+
+def test_una_cadena_con_y_sin_denied_reason_sigue_verificando(fake_admin):
+    """Agregar una clave al payload no invalida lo ya hasheado: es la propiedad por la que
+    esta tabla se encadena por jsonb y no por columnas."""
+    dashboard_repo.insert_audit_log(
+        org_id="o", actor_user_id="a", actor_email=None, member_id=None, action="crear_trabajador"
+    )
+    _insert_denied("totp_no_enrolado")
+    dashboard_repo.insert_audit_log(
+        org_id="o", actor_user_id="a", actor_email=None, member_id=None, action="consultar_secreto"
+    )
+    _insert_denied("totp_reutilizado", action="sugerir_externa_denegado")
+
+    assert audit_chain.verify_chain_jsonb(PANEL_TABLE) == (True, None)
+
+
+def test_alterar_el_motivo_de_una_denegacion_rompe_la_cadena(fake_admin):
+    """El motivo queda protegido por el hash: nadie puede reescribir «totp_invalido» como
+    «totp_reutilizado» sin que se note."""
+    entry = _insert_denied("totp_invalido")
+    fake_admin._tables[PANEL_TABLE][0]["payload"]["denied_reason"] = "totp_reutilizado"
+
+    ok, broken_id = audit_chain.verify_chain_jsonb(PANEL_TABLE)
+    assert ok is False and broken_id == entry["id"]
+
+
+@pytest.mark.parametrize("valor", ["123456", "12 34 56", "totp invalido", "TOTP_INVALIDO", "", "a" * 41])
+def test_denied_reason_rechaza_todo_lo_que_no_sea_un_enum(fake_admin, valor):
+    """El guard es del repositorio y no de quien llama: aunque una ruta le pasara un código
+    TOTP por error, no llega a la auditoría."""
+    with pytest.raises(ValueError):
+        _insert_denied(valor)
+    assert fake_admin._tables.get(PANEL_TABLE, []) == []
+
+
+def test_list_audit_log_proyecta_denied_reason_y_la_api_lo_expone():
+    """Los tres lugares del fallo G8: payload, proyección y schema de salida."""
+    from app.schemas.dashboard import AuditLogEntryOut
+
+    flat = dashboard_repo._flatten_audit_row(
+        {
+            "id": "a1",
+            "actor_email": None,
+            "created_at": "2026-09-19T00:00:00Z",
+            "payload": {"action": "revocar_interna_denegado", "denied_reason": "totp_invalido"},
+        }
+    )
+    assert flat["denied_reason"] == "totp_invalido"
+    assert AuditLogEntryOut(**flat).model_dump()["denied_reason"] == "totp_invalido"
+
+
+def test_denied_reason_es_none_en_las_filas_anteriores_a_hu18():
+    flat = dashboard_repo._flatten_audit_row(
+        {"id": "a1", "actor_email": None, "created_at": "2026-09-18T00:00:00Z",
+         "payload": {"action": "consultar_secreto"}}
+    )
+    assert flat["denied_reason"] is None

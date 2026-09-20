@@ -7,10 +7,14 @@ empresa ve las credenciales de otra. El org_id llega siempre resuelto desde la
 tabla organizations por require_enterprise, nunca desde un claim del token.
 """
 
+import re
 from datetime import datetime, timezone
 
 from app.services import audit_chain, credential_secret_repo
 from app.services.db_client import get_supabase_admin
+
+# Un motivo de denegación es un enum, nunca un valor libre (ver insert_audit_log).
+_DENIED_REASON_RE = re.compile(r"[a-z_]{1,40}")
 
 MEMBERS_TABLE = "dashboard_members"
 CREDENTIALS_TABLE = "dashboard_credentials"
@@ -296,6 +300,7 @@ def insert_audit_log(
     credential_type: str | None = None,
     vault_item_id: str | None = None,
     target_member_id: str | None = None,
+    denied_reason: str | None = None,
 ) -> dict:
     """Entrada en la cadena de auditoría de la organización (payload jsonb).
 
@@ -310,9 +315,18 @@ def insert_audit_log(
     member_id es None para una credencial sin asignar (pool). target_member_id solo
     se usa al reasignar: a quién pasa la credencial (member_id es de quién sale).
 
+    denied_reason (HU18): por qué el segundo factor rechazó la operación
+    (totp_no_enrolado, totp_invalido, ...). Va en el payload SOLO cuando existe, así el
+    payload de todas las demás acciones queda idéntico. Tiene que ser un enum
+    ([a-z_]+): nunca algo que pueda ser un código TOTP, y eso se exige acá y no se confía
+    en quien llama.
+
     Ningún valor de este payload es una contraseña, y el test que lo sostiene
     inspecciona exactamente este dict.
     """
+    if denied_reason is not None and not _DENIED_REASON_RE.fullmatch(denied_reason):
+        raise ValueError("denied_reason debe ser un identificador ([a-z_]+), no un valor libre")
+
     payload = {
         "org_id": org_id,
         "actor_user_id": actor_user_id,
@@ -323,6 +337,8 @@ def insert_audit_log(
         "vault_item_id": vault_item_id,
         "action": action,
     }
+    if denied_reason is not None:
+        payload["denied_reason"] = denied_reason
     return audit_chain.append_entry_jsonb(
         AUDIT_LOG_TABLE, payload, extra={"actor_email": actor_email}
     )
@@ -378,6 +394,7 @@ _AUDIT_PAYLOAD_KEYS = (
     "credential_type",
     "vault_item_id",
     "action",
+    "denied_reason",
 )
 
 
